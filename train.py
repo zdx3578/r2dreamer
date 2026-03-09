@@ -20,6 +20,7 @@ torch.set_float32_matmul_precision("high")
 
 @hydra.main(version_base=None, config_path="configs", config_name="configs")
 def main(config):
+    tools.require_python()
     tools.set_seed_everywhere(config.seed)
     if config.deterministic_run:
         tools.enable_deterministic_run()

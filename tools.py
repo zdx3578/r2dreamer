@@ -3,6 +3,7 @@ import io
 import json
 import os
 import random
+import sys
 import time
 
 import numpy as np
@@ -38,6 +39,18 @@ class Tee(io.TextIOBase):
     def isatty(self):
         # Preserve tty detection for progress bars etc.
         return any(hasattr(stream, "isatty") and stream.isatty() for stream in self._streams)
+
+
+def require_python(min_version=(3, 12), version_info=None):
+    version = version_info or sys.version_info
+    current = tuple(version[:2])
+    if current < tuple(min_version):
+        required = ".".join(str(part) for part in min_version)
+        found = ".".join(str(part) for part in current)
+        raise RuntimeError(
+            f"Python >= {required} is required for this repository, but found Python {found}. "
+            "Create a Python 3.12+ environment before running train.py."
+        )
 
 
 def setup_console_log(logdir, filename="console.log"):

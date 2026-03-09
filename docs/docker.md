@@ -2,6 +2,8 @@
 
 If you prefer not to install dependencies locally, or if you want to train your models on a containerized remote machine, you can use the provided Dockerfile to build an image with all dependencies pre-installed.
 
+This repository requires Python 3.12 or newer. The Docker build now checks that requirement explicitly.
+
 The only prerequisites are [Docker](https://docs.docker.com/get-docker/) and, on your deployment machine, the [NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html) for GPU support.
 
 To build the Docker image, run the following command from the root of the repository:
