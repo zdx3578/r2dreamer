@@ -17,7 +17,7 @@ decoder:
   mlp_keys: 'state_flags|progress|action_mask'
   cnn_keys: 'grid'
 
-grid_encoding: onehot
+grid_encoding: token
 num_colors: 16
 reward_per_level: 1.0
 reward_win: 10.0

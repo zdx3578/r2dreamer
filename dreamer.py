@@ -10,8 +10,13 @@ from torch.amp import GradScaler, autocast
 from torch.optim.lr_scheduler import LambdaLR
 
 import networks
+import binding_head
+import objectification
+import operator_bank
 import phase1a
 import rssm
+import rule_update
+import signature_head
 import tools
 from networks import Projector
 from optim import LaProp, clip_grad_agc_
@@ -70,12 +75,26 @@ class Dreamer(nn.Module):
         self.use_effect_model = bool(getattr(config, "use_effect_model", False))
         self.use_reachability_head = bool(getattr(config, "use_reachability_head", False))
         self.use_goal_progress_head = bool(getattr(config, "use_goal_progress_head", False))
+        self.use_objectification = bool(getattr(config, "use_objectification", False))
+        self.use_operator_bank = bool(getattr(config, "use_operator_bank", False))
+        self.use_binding_head = bool(getattr(config, "use_binding_head", False))
+        self.use_signature_head = bool(getattr(config, "use_signature_head", False))
+        self.use_rule_update = bool(getattr(config, "use_rule_update", False))
         self.goal_horizon = int(getattr(getattr(config, "phase1a", {}), "goal_horizon", 3))
+        self.phase2_m_obj_threshold = float(getattr(getattr(config, "phase2", {}), "m_obj_threshold", 0.2))
 
         if self.use_effect_model and not self.use_structured_readout:
             raise ValueError("Effect model requires use_structured_readout=True.")
         if (self.use_reachability_head or self.use_goal_progress_head) and not self.use_structured_readout:
             raise ValueError("Phase 1A heads require use_structured_readout=True.")
+        if self.use_objectification and not (self.use_structured_readout and self.use_effect_model):
+            raise ValueError("Objectification requires both structured readout and effect model.")
+        if self.use_operator_bank and not (self.use_objectification and self.use_effect_model):
+            raise ValueError("Operator bank requires objectification and effect model.")
+        if (self.use_binding_head or self.use_signature_head or self.use_rule_update) and not self.use_operator_bank:
+            raise ValueError("Binding/signature/rule-update require use_operator_bank=True.")
+        if self.use_operator_bank and not (self.use_binding_head and self.use_signature_head and self.use_rule_update):
+            raise ValueError("Phase 2 requires operator bank, binding head, signature head, and rule update together.")
 
         modules = {
             "rssm": self.rssm,
@@ -194,6 +213,72 @@ class Dreamer(nn.Module):
             )
             modules.update({"goal_progress_head": self.goal_progress_head})
             self._loss_scales.setdefault("goal", 1.0)
+        if self.use_objectification:
+            self.objectification = objectification.ObjectificationModule(
+                config.objectification,
+                self.structured_readout.obj_slots,
+                self.structured_readout.obj_dim,
+                int(config.effect_model.latent_dim),
+            )
+            modules.update({"objectification": self.objectification})
+            self._loss_scales.setdefault("obj_stable", 1.0)
+            self._loss_scales.setdefault("obj_local", 1.0)
+            self._loss_scales.setdefault("obj_rel", 1.0)
+        if self.use_operator_bank:
+            self.operator_bank = operator_bank.OperatorBank(
+                config.operator_bank,
+                self.rssm.feat_size,
+                self.act_dim,
+                self.structured_readout.map_slots,
+                self.structured_readout.map_dim,
+                self.structured_readout.obj_slots,
+                self.structured_readout.obj_dim,
+                self.structured_readout.global_dim,
+                self.structured_readout.rule_dim,
+                int(config.effect_model.latent_dim),
+                config.act,
+                bool(config.norm),
+            )
+            modules.update({"operator_bank": self.operator_bank})
+            self._loss_scales.setdefault("op_assign", 1.0)
+            self._loss_scales.setdefault("op_proto", 1.0)
+            self._loss_scales.setdefault("op_reuse", 1.0)
+        if self.use_binding_head:
+            self.binding_head = binding_head.BindingHead(
+                config.binding_head,
+                int(config.operator_bank.operator_dim),
+                int(config.operator_bank.operator_dim),
+                config.act,
+                bool(config.norm),
+            )
+            modules.update({"binding_head": self.binding_head})
+            self._loss_scales.setdefault("bind_ce", 1.0)
+            self._loss_scales.setdefault("bind_consistency", 1.0)
+        if self.use_signature_head:
+            self.signature_head = signature_head.SignatureHead(
+                config.signature_head,
+                int(config.operator_bank.operator_dim),
+                int(config.operator_bank.operator_dim),
+                config.act,
+                bool(config.norm),
+            )
+            modules.update({"signature_head": self.signature_head})
+            self._loss_scales.setdefault("sig_scope", 1.0)
+            self._loss_scales.setdefault("sig_duration", 1.0)
+            self._loss_scales.setdefault("sig_impact", 1.0)
+        if self.use_rule_update:
+            self.rule_update_head = rule_update.RuleUpdateHead(
+                config.rule_update,
+                int(config.effect_model.latent_dim),
+                int(config.operator_bank.operator_dim),
+                int(config.binding_head.num_bindings),
+                3,
+                self.structured_readout.rule_dim,
+                config.act,
+                bool(config.norm),
+            )
+            modules.update({"rule_update_head": self.rule_update_head})
+            self._loss_scales.setdefault("rule_update", 1.0)
         # count number of parameters in each module
         for key, module in modules.items():
             if isinstance(module, nn.Parameter):
@@ -391,7 +476,7 @@ class Dreamer(nn.Module):
         if self.rep_loss == "dreamerpro":
             self.ema_update()
         metrics = {}
-        with autocast(device_type=self.device.type, dtype=torch.float16):
+        with autocast(device_type=self.device.type, dtype=torch.float16, enabled=self.device.type == "cuda"):
             (stoch, deter), mets = self._cal_grad(p_data, initial)
         self._scaler.unscale_(self._optimizer)  # unscale grads in params
         if self.rep_loss == "dreamerpro" and self._ema_updates < self.freeze_prototypes_iters:
@@ -421,10 +506,7 @@ class Dreamer(nn.Module):
         replay_buffer.update(index, stoch.detach(), deter.detach())
         return metrics
 
-    def _phase1a_losses(self, feat, data, initial):
-        losses = {}
-        metrics = {}
-
+    def _build_structured_context(self, feat, data, initial):
         initial_feat = self.rssm.get_feat(initial[0], initial[1]).unsqueeze(1)
         feat_seq = torch.cat([initial_feat, feat], dim=1)
         readouts = self.structured_readout(feat_seq)
@@ -440,7 +522,50 @@ class Dreamer(nn.Module):
             "global_view": readouts["global_view"][:, 1:],
             "rule_ctx": readouts["rule_ctx"][:, 1:],
         }
+        structured = {
+            "feat_seq": feat_seq,
+            "readouts": readouts,
+            "current": current,
+            "nxt": nxt,
+            "target_delta_global": (nxt["global_view"] - current["global_view"]).detach(),
+            "target_delta_rule": (nxt["rule_ctx"] - current["rule_ctx"]).detach(),
+        }
+        if self.use_effect_model:
+            target_delta_map = (nxt["map_view"] - current["map_view"]).detach()
+            target_delta_obj = (nxt["obj_view"] - current["obj_view"]).detach()
+            z_eff = self.effect_model(feat_seq[:, :-1], data["action"], current["rule_ctx"])
+            effect_out = self.effect_heads(z_eff)
+            reward_target = self._seq_scalar(data["reward"])
+            terminal_target = self._seq_scalar(data["is_terminal"]).bool()
+            delta_struct = (
+                target_delta_map.abs().mean(dim=(-2, -1))
+                + target_delta_obj.abs().mean(dim=(-2, -1))
+                + structured["target_delta_global"].abs().mean(dim=-1)
+            ).unsqueeze(-1)
+            threshold = delta_struct.mean().detach() + 0.5 * delta_struct.std(unbiased=False).detach()
+            explicit_event = reward_target.abs() > 1e-6
+            structural_event = delta_struct > threshold
+            event_target = (explicit_event | terminal_target | structural_event).to(effect_out["event_logits"].dtype)
+            structured.update(
+                {
+                    "z_eff": z_eff,
+                    "effect_out": effect_out,
+                    "target_delta_map": target_delta_map,
+                    "target_delta_obj": target_delta_obj,
+                    "event_target": event_target,
+                    "reward_target": reward_target,
+                    "terminal_target": terminal_target,
+                }
+            )
+        return structured
 
+    def _phase1a_losses(self, structured, data):
+        losses = {}
+        metrics = {}
+        feat_seq = structured["feat_seq"]
+        readouts = structured["readouts"]
+        current = structured["current"]
+        nxt = structured["nxt"]
         feat_target = feat_seq.detach()
         losses["struct_map"] = F.mse_loss(readouts["map_recon"], feat_target)
         losses["struct_obj"] = F.mse_loss(readouts["obj_recon"], feat_target)
@@ -451,28 +576,16 @@ class Dreamer(nn.Module):
         metrics["phase1a/global_std"] = readouts["global_view"].std()
         metrics["phase1a/rule_std"] = readouts["rule_ctx"].std()
 
-        target_delta_global = (nxt["global_view"] - current["global_view"]).detach()
+        target_delta_global = structured["target_delta_global"]
         if self.use_effect_model:
-            target_delta_map = (nxt["map_view"] - current["map_view"]).detach()
-            target_delta_obj = (nxt["obj_view"] - current["obj_view"]).detach()
-            z_eff = self.effect_model(feat_seq[:, :-1], data["action"], current["rule_ctx"])
-            effect_out = self.effect_heads(z_eff)
+            target_delta_map = structured["target_delta_map"]
+            target_delta_obj = structured["target_delta_obj"]
+            effect_out = structured["effect_out"]
 
             losses["delta_map"] = F.smooth_l1_loss(effect_out["delta_map"], target_delta_map)
             losses["delta_obj"] = F.smooth_l1_loss(effect_out["delta_obj"], target_delta_obj)
             losses["delta_global"] = F.smooth_l1_loss(effect_out["delta_global"], target_delta_global)
-
-            delta_struct = (
-                target_delta_map.abs().mean(dim=(-2, -1))
-                + target_delta_obj.abs().mean(dim=(-2, -1))
-                + target_delta_global.abs().mean(dim=-1)
-            ).unsqueeze(-1)
-            threshold = delta_struct.mean().detach() + 0.5 * delta_struct.std(unbiased=False).detach()
-            explicit_event = to_f32(data["reward"]).abs().unsqueeze(-1) > 1e-6
-            structural_event = delta_struct > threshold
-            event_target = (explicit_event | data["is_terminal"].unsqueeze(-1) | structural_event).to(
-                effect_out["event_logits"].dtype
-            )
+            event_target = structured["event_target"]
             losses["event"] = F.binary_cross_entropy_with_logits(effect_out["event_logits"], event_target)
 
             metrics["phase1a/delta_map_abs"] = target_delta_map.abs().mean()
@@ -490,8 +603,8 @@ class Dreamer(nn.Module):
         if self.use_goal_progress_head:
             goal_pred = self.goal_progress_head(feat_seq[:, :-1], current["global_view"])
             goal_target = self._short_horizon_return(
-                to_f32(data["reward"]).unsqueeze(-1),
-                to_f32(data["is_terminal"]).unsqueeze(-1),
+                self._seq_scalar(data["reward"]),
+                self._seq_scalar(data["is_terminal"]),
                 1 - 1 / self.horizon,
                 self.goal_horizon,
             )
@@ -503,6 +616,149 @@ class Dreamer(nn.Module):
             losses["goal"] = F.smooth_l1_loss(goal_pred, goal_target)
             metrics["phase1a/goal_target"] = goal_target.mean()
 
+        return losses, metrics
+
+    def _objectification_losses(self, structured):
+        out = self.objectification(
+            structured["current"]["obj_view"],
+            structured["nxt"]["obj_view"],
+            structured["z_eff"],
+            structured["effect_out"]["delta_obj"],
+            structured["event_target"],
+        )
+        losses = {
+            "obj_stable": out["loss_obj_stable"],
+            "obj_local": out["loss_obj_local"],
+            "obj_rel": out["loss_obj_rel"],
+        }
+        metrics = {
+            "phase1b/m_obj": out["objectness_score"],
+            "phase1b/slot_match": out["slot_match_score"],
+            "phase1b/slot_concentration": out["slot_concentration"],
+            "phase1b/motif_entropy": out["motif_usage_entropy"],
+        }
+        return losses, metrics, out
+
+    def _phase2_gate(self, objectness_score):
+        return torch.clamp(
+            (objectness_score.detach() - self.phase2_m_obj_threshold) / max(1e-6, 1.0 - self.phase2_m_obj_threshold),
+            0.0,
+            1.0,
+        )
+
+    def _binding_proxy(self, structured):
+        target_delta_map = structured["target_delta_map"].abs().mean(dim=(-2, -1))
+        target_delta_obj = structured["target_delta_obj"].abs().mean(dim=(-2, -1))
+        target_delta_global = structured["target_delta_global"].abs().mean(dim=-1)
+        target_delta_rule = structured["target_delta_rule"].abs().mean(dim=-1)
+        rel_change = (
+            torch.einsum(
+                "...id,...jd->...ij",
+                structured["current"]["obj_view"],
+                structured["current"]["obj_view"],
+            )
+            - torch.einsum(
+                "...id,...jd->...ij",
+                structured["nxt"]["obj_view"],
+                structured["nxt"]["obj_view"],
+            )
+        ).abs().mean(dim=(-2, -1))
+        slot_mass = structured["target_delta_obj"].abs().mean(dim=-1) + 1e-6
+        slot_prob = slot_mass / slot_mass.sum(dim=-1, keepdim=True)
+        slot_concentration = slot_prob.max(dim=-1).values
+        spread = 1.0 - slot_concentration
+
+        scores = torch.stack(
+            [
+                slot_concentration,
+                spread * torch.tanh(target_delta_obj),
+                torch.tanh(rel_change),
+                torch.tanh(target_delta_map),
+                torch.tanh(target_delta_global + target_delta_rule + structured["event_target"].squeeze(-1)),
+            ],
+            dim=-1,
+        )
+        return scores / scores.sum(dim=-1, keepdim=True).clamp_min(1e-6)
+
+    def _signature_proxy(self, structured):
+        slot_mass = structured["target_delta_obj"].abs().mean(dim=-1) + 1e-6
+        slot_prob = slot_mass / slot_mass.sum(dim=-1, keepdim=True)
+        slot_concentration = slot_prob.max(dim=-1, keepdim=True).values
+        map_mass = structured["target_delta_map"].abs().mean(dim=(-2, -1)).unsqueeze(-1)
+        global_mass = structured["target_delta_global"].abs().mean(dim=-1, keepdim=True)
+        rule_mass = structured["target_delta_rule"].abs().mean(dim=-1, keepdim=True)
+        reward_mass = structured["reward_target"].abs()
+        event = structured["event_target"]
+        scope_target = torch.clamp(0.5 * (1.0 - slot_concentration) + 0.5 * torch.tanh(map_mass + global_mass), 0.0, 1.0)
+        duration_target = torch.clamp(torch.sigmoid(2.0 * (rule_mass + global_mass + event)), 0.0, 1.0)
+        impact_target = torch.tanh(reward_mass + global_mass + rule_mass)
+        return scope_target, duration_target, impact_target
+
+    def _phase2_losses(self, structured, data):
+        op_out = self.operator_bank(
+            structured["feat_seq"][:, :-1],
+            data["action"],
+            structured["current"]["map_view"],
+            structured["current"]["obj_view"],
+            structured["current"]["global_view"],
+            structured["current"]["rule_ctx"],
+            structured["z_eff"],
+        )
+        bind_out = self.binding_head(op_out["operator_embed"], op_out["context_embed"])
+        sig_out = self.signature_head(op_out["operator_embed"], op_out["context_embed"])
+        rule_out = self.rule_update_head(structured["z_eff"], op_out["operator_embed"], bind_out["q_b"], sig_out["q_sigma"])
+
+        gate = self._phase2_gate(structured["objectification_out"]["objectness_score"])
+        flat_q = op_out["q_u"].reshape(-1, op_out["q_u"].shape[-1])
+        flat_eff = op_out["effect_embed"].reshape(-1, op_out["effect_embed"].shape[-1])
+        flat_binding = bind_out["q_b"].reshape(-1, bind_out["q_b"].shape[-1])
+
+        op_assign = -(op_out["target_q"].detach() * torch.log(op_out["q_u"] + 1e-6)).sum(dim=-1).mean()
+        if flat_q.shape[0] > 1:
+            eff_sim = torch.matmul(flat_eff, flat_eff.transpose(0, 1))
+            op_sim = torch.matmul(flat_q, flat_q.transpose(0, 1))
+            op_proto = F.smooth_l1_loss(op_sim, eff_sim.detach())
+        else:
+            op_proto = torch.zeros_like(op_assign)
+        uniform = torch.full_like(op_out["avg_usage"], 1.0 / op_out["avg_usage"].numel())
+        op_reuse = (op_out["avg_usage"] * (torch.log(op_out["avg_usage"] + 1e-6) - torch.log(uniform))).sum()
+
+        binding_target = self._binding_proxy(structured)
+        bind_ce = -(binding_target.detach() * torch.log(bind_out["q_b"] + 1e-6)).sum(dim=-1).mean()
+        operator_binding = torch.matmul(flat_q.transpose(0, 1), flat_binding) / flat_q.sum(dim=0, keepdim=True).transpose(0, 1).clamp_min(1e-6)
+        bind_expected = torch.matmul(flat_q, operator_binding.detach()).reshape_as(bind_out["q_b"])
+        bind_consistency = F.smooth_l1_loss(bind_out["q_b"], bind_expected)
+
+        scope_target, duration_target, impact_target = self._signature_proxy(structured)
+        sig_scope = F.smooth_l1_loss(sig_out["scope"], scope_target)
+        sig_duration = F.smooth_l1_loss(sig_out["duration"], duration_target)
+        sig_impact = F.smooth_l1_loss(sig_out["impact"], impact_target)
+        rule_update_loss = F.smooth_l1_loss(rule_out["delta_rule"], structured["target_delta_rule"])
+
+        losses = {
+            "op_assign": gate * op_assign,
+            "op_proto": gate * op_proto,
+            "op_reuse": gate * op_reuse,
+            "bind_ce": gate * bind_ce,
+            "bind_consistency": gate * bind_consistency,
+            "sig_scope": gate * sig_scope,
+            "sig_duration": gate * sig_duration,
+            "sig_impact": gate * sig_impact,
+            "rule_update": gate * rule_update_loss,
+        }
+        metrics = {
+            "phase2/gate_scale": gate,
+            "phase2/operator_entropy": op_out["sample_entropy"],
+            "phase2/operator_usage_entropy": op_out["usage_entropy"],
+            "phase2/operator_usage_max": op_out["avg_usage"].max(),
+            "phase2/binding_entropy": bind_out["entropy"],
+            "phase2/binding_max": bind_out["q_b"].max(dim=-1).values.mean(),
+            "phase2/signature_scope": sig_out["scope"].mean(),
+            "phase2/signature_duration": sig_out["duration"].mean(),
+            "phase2/signature_impact": sig_out["impact"].mean(),
+            "phase2/signature_std": sig_out["q_sigma"].std(),
+            "phase2/rule_delta_abs": structured["target_delta_rule"].abs().mean(),
+        }
         return losses, metrics
 
     def _short_horizon_return(self, reward, terminal, disc, horizon):
@@ -603,16 +859,27 @@ class Dreamer(nn.Module):
             raise NotImplementedError
 
         # reward and continue
-        losses["rew"] = torch.mean(-self.reward(feat).log_prob(to_f32(data["reward"]).unsqueeze(-1)))
-        cont = 1.0 - to_f32(data["is_terminal"]).unsqueeze(-1)
+        reward_target = self._seq_scalar(data["reward"])
+        losses["rew"] = torch.mean(-self.reward(feat).log_prob(reward_target))
+        cont = 1.0 - self._seq_scalar(data["is_terminal"])
         losses["con"] = torch.mean(-self.cont(feat).log_prob(cont))
         # log
         metrics["dyn_entropy"] = torch.mean(self.rssm.get_dist(prior_logit).entropy())
         metrics["rep_entropy"] = torch.mean(self.rssm.get_dist(post_logit).entropy())
         if self.use_structured_readout:
-            phase1a_losses, phase1a_metrics = self._phase1a_losses(feat, data, initial)
+            structured = self._build_structured_context(feat, data, initial)
+            phase1a_losses, phase1a_metrics = self._phase1a_losses(structured, data)
             losses.update(phase1a_losses)
             metrics.update(phase1a_metrics)
+            if self.use_objectification:
+                object_losses, object_metrics, object_out = self._objectification_losses(structured)
+                losses.update(object_losses)
+                metrics.update(object_metrics)
+                structured["objectification_out"] = object_out
+            if self.use_operator_bank:
+                phase2_losses, phase2_metrics = self._phase2_losses(structured, data)
+                losses.update(phase2_losses)
+                metrics.update(phase2_metrics)
 
         # === Imagination rollout for actor-critic ===
         # (B*T, S, K), (B*T, D)
@@ -676,9 +943,9 @@ class Dreamer(nn.Module):
 
         # === Replay-based value learning (keep gradients through world model) ===
         last, term, reward = (
-            to_f32(data["is_last"]).unsqueeze(-1),
-            to_f32(data["is_terminal"]).unsqueeze(-1),
-            to_f32(data["reward"]).unsqueeze(-1),
+            self._seq_scalar(data["is_last"]),
+            self._seq_scalar(data["is_terminal"]),
+            self._seq_scalar(data["reward"]),
         )
         feat = self.rssm.get_feat(post_stoch, post_deter)
         boot = ret[:, 0].reshape(B, T, 1)
@@ -708,6 +975,12 @@ class Dreamer(nn.Module):
         metrics.update({f"loss/{name}": loss for name, loss in losses.items()})
         metrics.update({"opt/loss": total_loss})
         return (post_stoch, post_deter), metrics
+
+    def _seq_scalar(self, value):
+        value = to_f32(value)
+        if value.dim() == 2:
+            return value.unsqueeze(-1)
+        return value
 
     @torch.no_grad()
     def _imagine(self, start, imag_horizon):

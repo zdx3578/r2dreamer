@@ -13,6 +13,27 @@ def _to_nested_list(value: Any) -> Any:
     return value
 
 
+def _to_int(value: Any, default: int = 0) -> int:
+    try:
+        if hasattr(value, "value"):
+            return int(value.value)
+        return int(value)
+    except Exception:
+        return int(default)
+
+
+def _extract_action_context(action_input: Any) -> tuple[int, dict[str, Any]]:
+    if action_input is None:
+        return 0, {}
+    action_id = _to_int(getattr(action_input, "id", 0), default=0)
+    data = getattr(action_input, "data", {}) or {}
+    if hasattr(data, "model_dump"):
+        data = data.model_dump()
+    if not isinstance(data, dict):
+        data = {}
+    return action_id, data
+
+
 def normalize_arc_frame(frame_any: Any, size: tuple[int, int]) -> np.ndarray:
     frame = _to_nested_list(frame_any)
     for _ in range(3):
@@ -43,6 +64,8 @@ def normalize_arc_frame(frame_any: Any, size: tuple[int, int]) -> np.ndarray:
 def encode_arc_grid(grid: np.ndarray, num_colors: int, encoding: str) -> np.ndarray:
     grid = np.asarray(grid, dtype=np.int32)
     grid = np.clip(grid, 0, int(num_colors) - 1)
+    if encoding == "token":
+        return grid[..., None].astype(np.int32)
     if encoding == "onehot":
         return np.eye(int(num_colors), dtype=np.float32)[grid]
     if encoding == "scalar":
@@ -59,6 +82,59 @@ def encode_state_flags(state_name: str) -> np.ndarray:
             state not in {"NOT_PLAYED", "WIN", "GAME_OVER"},
             state == "WIN",
             state == "GAME_OVER",
+        ],
+        dtype=np.float32,
+    )
+
+
+def encode_arc_state_flags(state_name: str, *, full_reset: bool, action_id: int, action_data: dict[str, Any]) -> np.ndarray:
+    base = encode_state_flags(state_name)
+    has_coords = "x" in action_data and "y" in action_data
+    return np.concatenate(
+        [
+            base,
+            np.array(
+                [
+                    float(bool(full_reset)),
+                    float(int(action_id) == 0),
+                    float(int(action_id) == 6),
+                    float(bool(has_coords)),
+                ],
+                dtype=np.float32,
+            ),
+        ],
+        axis=0,
+    )
+
+
+def encode_arc_progress(
+    *,
+    levels_completed: int,
+    win_levels: int,
+    available_actions: list[int],
+    action_count: int,
+    action_id: int,
+    action_data: dict[str, Any],
+    size: tuple[int, int],
+) -> np.ndarray:
+    progress_ratio = float(levels_completed) / float(win_levels) if win_levels > 0 else 0.0
+    remaining_ratio = float(max(0, win_levels - levels_completed)) / float(max(1, win_levels))
+    action_ratio = float(len(available_actions)) / float(max(1, action_count))
+    action_id_norm = float(action_id) / float(max(1, action_count - 1))
+    width = max(1, int(size[1]) - 1)
+    height = max(1, int(size[0]) - 1)
+    x = float(_to_int(action_data.get("x", 0), default=0)) / float(width)
+    y = float(_to_int(action_data.get("y", 0), default=0)) / float(height)
+    return np.array(
+        [
+            float(levels_completed),
+            float(win_levels),
+            float(progress_ratio),
+            float(remaining_ratio),
+            float(action_ratio),
+            float(action_id_norm),
+            float(np.clip(x, 0.0, 1.0)),
+            float(np.clip(y, 0.0, 1.0)),
         ],
         dtype=np.float32,
     )
@@ -112,7 +188,28 @@ class Arc3Transition:
     levels_completed: int
     win_levels: int
     available_actions: list[int]
+    game_id: str
+    guid: str
+    full_reset: bool
+    action_id: int
+    action_data: dict[str, Any]
     raw: Any
+
+
+class Arc3ActionSpace(gym.spaces.Box):
+    def __init__(self, action_count: int, width: int, height: int):
+        super().__init__(0.0, 1.0, shape=(int(action_count), int(width), int(height)), dtype=np.float32)
+        self.action_count = int(action_count)
+        self.width = int(width)
+        self.height = int(height)
+        self.multi_discrete = True
+
+    def sample(self, mask=None, probability=None):
+        action = np.zeros(self.action_count + self.width + self.height, dtype=np.float32)
+        action[np.random.randint(self.action_count)] = 1.0
+        action[self.action_count + np.random.randint(self.width)] = 1.0
+        action[self.action_count + self.width + np.random.randint(self.height)] = 1.0
+        return action
 
 
 class Arc3Grid(gym.Env):
@@ -122,7 +219,7 @@ class Arc3Grid(gym.Env):
         self,
         game_id: str,
         size: tuple[int, int] = (64, 64),
-        grid_encoding: str = "onehot",
+        grid_encoding: str = "token",
         num_colors: int = 16,
         reward_per_level: float = 1.0,
         reward_win: float = 10.0,
@@ -156,21 +253,23 @@ class Arc3Grid(gym.Env):
         self._last_transition = None
         self.reward_range = [-np.inf, np.inf]
 
-        grid_channels = self._num_colors if self._grid_encoding == "onehot" else 1
+        if self._grid_encoding == "token":
+            grid_space = gym.spaces.Box(0, self._num_colors - 1, self._size + (1,), dtype=np.int32)
+        else:
+            grid_channels = self._num_colors if self._grid_encoding == "onehot" else 1
+            grid_space = gym.spaces.Box(0.0, 1.0, self._size + (grid_channels,), dtype=np.float32)
         self._observation_space = gym.spaces.Dict(
             {
-                "grid": gym.spaces.Box(0.0, 1.0, self._size + (grid_channels,), dtype=np.float32),
-                "state_flags": gym.spaces.Box(0.0, 1.0, (4,), dtype=np.float32),
-                "progress": gym.spaces.Box(-np.inf, np.inf, (3,), dtype=np.float32),
+                "grid": grid_space,
+                "state_flags": gym.spaces.Box(0.0, 1.0, (8,), dtype=np.float32),
+                "progress": gym.spaces.Box(-np.inf, np.inf, (8,), dtype=np.float32),
                 "action_mask": gym.spaces.Box(0.0, 1.0, (self._action_count,), dtype=np.float32),
                 "is_first": gym.spaces.Box(0, 1, (), bool),
                 "is_last": gym.spaces.Box(0, 1, (), bool),
                 "is_terminal": gym.spaces.Box(0, 1, (), bool),
             }
         )
-        action_shape = (self._action_count, self._size[1], self._size[0])
-        self._action_space = gym.spaces.Box(0.0, 1.0, action_shape, dtype=np.float32)
-        self._action_space.multi_discrete = True
+        self._action_space = Arc3ActionSpace(self._action_count, self._size[1], self._size[0])
 
     @property
     def observation_space(self):
@@ -218,6 +317,11 @@ class Arc3Grid(gym.Env):
             "win_levels": int(transition.win_levels),
             "available_actions": list(map(int, transition.available_actions)),
             "invalid_action": invalid_action,
+            "game_id": transition.game_id,
+            "guid": transition.guid,
+            "full_reset": bool(transition.full_reset),
+            "action_id": int(transition.action_id),
+            "action_data": dict(transition.action_data),
         }
         self._last_transition = transition
         return obs, reward, done, info
@@ -279,26 +383,39 @@ class Arc3Grid(gym.Env):
         state_obj = getattr(raw, "state", None)
         state_name = getattr(state_obj, "name", str(state_obj))
         available_actions = [int(v) for v in getattr(raw, "available_actions", [])]
+        action_id, action_data = _extract_action_context(getattr(raw, "action_input", None))
         transition = Arc3Transition(
             grid=normalize_arc_frame(getattr(raw, "frame", []), self._size),
             state_name=str(state_name),
             levels_completed=int(getattr(raw, "levels_completed", 0)),
             win_levels=int(getattr(raw, "win_levels", 0)),
             available_actions=available_actions,
+            game_id=str(getattr(raw, "game_id", self._game_id)),
+            guid=str(getattr(raw, "guid", "")),
+            full_reset=bool(getattr(raw, "full_reset", False)),
+            action_id=action_id,
+            action_data=action_data,
             raw=raw,
         )
         return transition
 
     def _format_obs(self, transition: Arc3Transition, *, is_first: bool, is_last: bool, is_terminal: bool):
-        progress_ratio = 0.0
-        if transition.win_levels > 0:
-            progress_ratio = float(transition.levels_completed) / float(transition.win_levels)
         return {
             "grid": encode_arc_grid(transition.grid, self._num_colors, self._grid_encoding),
-            "state_flags": encode_state_flags(transition.state_name),
-            "progress": np.array(
-                [float(transition.levels_completed), float(transition.win_levels), float(progress_ratio)],
-                dtype=np.float32,
+            "state_flags": encode_arc_state_flags(
+                transition.state_name,
+                full_reset=transition.full_reset,
+                action_id=transition.action_id,
+                action_data=transition.action_data,
+            ),
+            "progress": encode_arc_progress(
+                levels_completed=transition.levels_completed,
+                win_levels=transition.win_levels,
+                available_actions=transition.available_actions,
+                action_count=self._action_count,
+                action_id=transition.action_id,
+                action_data=transition.action_data,
+                size=self._size,
             ),
             "action_mask": encode_action_mask(transition.available_actions, self._action_count),
             "is_first": bool(is_first),

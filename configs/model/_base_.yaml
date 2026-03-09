@@ -13,6 +13,9 @@ use_goal_progress_head: False
 use_reachability_head: False
 use_objectification: False
 use_operator_bank: False
+use_binding_head: False
+use_signature_head: False
+use_rule_update: False
 use_event_pipeline: False
 use_sl_gate: False
 
@@ -49,12 +52,27 @@ loss_scales:
   event: 0.5
   reach: 0.25
   goal: 0.25
+  obj_stable: 0.25
+  obj_local: 0.25
+  obj_rel: 0.25
+  op_assign: 0.1
+  op_proto: 0.1
+  op_reuse: 0.05
+  bind_ce: 0.05
+  bind_consistency: 0.05
+  sig_scope: 0.05
+  sig_duration: 0.05
+  sig_impact: 0.05
+  rule_update: 0.1
 
 r2dreamer:
   lambd: 5e-4
 
 phase1a:
   goal_horizon: 3
+
+phase2:
+  m_obj_threshold: 0.2
 
 structured_readout:
   layers: 2
@@ -80,6 +98,42 @@ reachability_head:
   hidden: ${model.units}
 
 goal_progress_head:
+  layers: 1
+  hidden: ${model.units}
+
+objectification:
+  match_dim: ${model.units}
+  relation_dim: ${model.units}
+  num_motifs: 8
+  temperature: 0.5
+  ema_decay: 0.99
+  w_match: 1.0
+  w_temp: 1.0
+  w_smooth: 0.5
+  w_sparse: 1.0
+  w_conc: 1.0
+  w_cf: 0.5
+  w_pair: 1.0
+  w_motif: 1.0
+  w_reuse: 0.5
+
+operator_bank:
+  layers: 2
+  hidden: ${model.units}
+  num_operators: 8
+  operator_dim: ${model.units}
+  temperature: 0.5
+
+binding_head:
+  layers: 1
+  hidden: ${model.units}
+  num_bindings: 5
+
+signature_head:
+  layers: 1
+  hidden: ${model.units}
+
+rule_update:
   layers: 1
   hidden: ${model.units}
 
@@ -116,6 +170,15 @@ rssm:
 encoder:
   mlp_keys: ${env.encoder.mlp_keys}
   cnn_keys: ${env.encoder.cnn_keys}
+  arc3_grid_keys: '^$'
+  arc3_grid:
+    num_colors: 16
+    token_dim: ${model.depth}
+    depth: ${model.depth}
+    mults: [2, 3, 4, 4]
+    act: ${model.act}
+    norm: ${model.norm}
+    kernel_size: 3
   mlp:
     shape: null
     layers: 3

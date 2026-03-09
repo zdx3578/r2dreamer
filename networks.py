@@ -6,6 +6,7 @@ import torch
 import torch.nn.functional as F
 from torch import nn
 
+from arc3_grid_encoder import Arc3GridEncoder
 import distributions as dists
 from tools import weight_init_
 
@@ -105,14 +106,28 @@ class MultiEncoder(nn.Module):
         super().__init__()
         excluded = ("is_first", "is_last", "is_terminal", "reward")
         shapes = {k: v for k, v in shapes.items() if k not in excluded and not k.startswith("log_")}
-        self.cnn_shapes = {k: v for k, v in shapes.items() if len(v) == 3 and re.match(config.cnn_keys, k)}
+        arc3_grid_keys = str(getattr(config, "arc3_grid_keys", "^$"))
+        self.arc3_grid_shapes = {k: v for k, v in shapes.items() if len(v) == 3 and re.match(arc3_grid_keys, k)}
+        self.cnn_shapes = {
+            k: v
+            for k, v in shapes.items()
+            if len(v) == 3 and k not in self.arc3_grid_shapes and re.match(config.cnn_keys, k)
+        }
         self.mlp_shapes = {k: v for k, v in shapes.items() if len(v) in (1, 2) and re.match(config.mlp_keys, k)}
+        print("Encoder ARC3 grid shapes:", self.arc3_grid_shapes)
         print("Encoder CNN shapes:", self.cnn_shapes)
         print("Encoder MLP shapes:", self.mlp_shapes)
 
         self.out_dim = 0
         self.selectors = []
         self.encoders = []
+        if self.arc3_grid_shapes:
+            if len(self.arc3_grid_shapes) != 1:
+                raise NotImplementedError("Arc3GridEncoder currently supports a single grid input.")
+            key, shape = next(iter(self.arc3_grid_shapes.items()))
+            self.encoders.append(Arc3GridEncoder(config.arc3_grid, shape))
+            self.selectors.append(lambda obs, key=key: obs[key])
+            self.out_dim += self.encoders[-1].out_dim
         if self.cnn_shapes:
             input_ch = sum([v[-1] for v in self.cnn_shapes.values()])
             input_shape = tuple(self.cnn_shapes.values())[0][:2] + (input_ch,)

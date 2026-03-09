@@ -5,6 +5,11 @@ model:
   use_effect_model: True
   use_goal_progress_head: True
   use_reachability_head: True
+  use_objectification: True
+  use_operator_bank: True
+  use_binding_head: True
+  use_signature_head: True
+  use_rule_update: True
   encoder:
     arc3_grid_keys: 'grid'
     arc3_grid:

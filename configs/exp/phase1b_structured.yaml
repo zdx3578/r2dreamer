@@ -5,7 +5,4 @@ model:
   use_effect_model: True
   use_goal_progress_head: True
   use_reachability_head: True
-  use_objectification: False
-  use_operator_bank: False
-  use_event_pipeline: False
-  use_sl_gate: False
+  use_objectification: True
