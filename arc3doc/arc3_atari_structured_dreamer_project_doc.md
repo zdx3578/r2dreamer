@@ -601,6 +601,19 @@ Grid / JSON state  ->  grid/pattern encoder  ->  slot/object adapter  ->  Dreame
 - ARC3 不需要先视觉增强，但仍然需要对象化过程训练
 - Atari 通常更需要前端表征增强，否则小对象丢失会污染后续全部模块
 
+### 执行备注（2026-03-09）
+- 长期目标仍是 Atari / ARC3 共享后端、分开前端。
+- 但当前实现阶段不再并行调两条训练线，而是先冻结 ARC3、专注 Atari。
+- ARC3 冻结点：
+  - `ee411c1 fix: wire arc3 special token config`
+  - `aa2c1fa refactor: align structured state with masked views`
+- 原因：
+  - 双环境并行会同时引入前端差异、奖励分布差异、对象化难度差异，难以判断训练改动是否真正有效。
+  - Atari 像素线更适合先做单域对照，验证 Phase 1B/2 的训练稳定性与收益。
+- 当前阶段的工程原则：
+  - ARC3 只保留接口正确性和 smoke 可运行性。
+  - 所有新的训练稳定性改动，先在 Atari 基线验证，再择优回灌 ARC3。
+
 ---
 
 ## 13. 训练与验证方法

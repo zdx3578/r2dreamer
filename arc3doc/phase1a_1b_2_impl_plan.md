@@ -827,6 +827,18 @@ Phase 2 通过的最低要求：
 - slot/objectification 可用性  
 - operator/binding/signature 可用性
 
+### 执行备注（2026-03-09）
+- 当前工程执行策略从“双域并行迭代”切换为“ARC3 先收口冻结，Atari 单线推进训练改进”。
+- ARC3 冻结点对应提交：
+  - `ee411c1 fix: wire arc3 special token config`
+  - `aa2c1fa refactor: align structured state with masked views`
+- 冻结含义：
+  - ARC3 保留已打通的原生 grid/state 路径、`valid_mask` 接入、`M_t/O_t/g_t/rho_t` 结构接口，不再作为当前阶段的主训练调参域。
+  - 后续 Phase 1B 稳定性、Phase 2 operator/binding/signature 的训练改进，先仅在 Atari 单游戏基线完成。
+- 回灌条件：
+  - Atari 单线基线上至少完成 `3 seeds` 短基准，且全部通过 Phase 1B gate。
+  - Phase 2 指标不再明显塌缩后，再把已验证有效的训练改动迁回 ARC3。
+
 ### Step C：多游戏混训
 开始做：
 - within-domain 多游戏训练  
