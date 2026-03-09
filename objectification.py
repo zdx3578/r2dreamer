@@ -16,12 +16,16 @@ class ObjectificationModule(nn.Module):
         self.obj_dim = int(obj_dim)
         self.effect_dim = int(effect_dim)
         self.temperature = float(config.temperature)
+        self.identity_temperature = float(getattr(config, "identity_temperature", 0.25))
         self.num_motifs = int(config.num_motifs)
         self.ema_decay = float(config.ema_decay)
+        self.sinkhorn_iters = int(getattr(config, "sinkhorn_iters", 10))
 
         self.w_match = float(config.w_match)
         self.w_temp = float(config.w_temp)
         self.w_smooth = float(config.w_smooth)
+        self.w_cycle = float(getattr(config, "w_cycle", 0.5))
+        self.w_contrast = float(getattr(config, "w_contrast", 0.5))
         self.w_sparse = float(config.w_sparse)
         self.w_conc = float(config.w_conc)
         self.w_cf = float(config.w_cf)
@@ -46,7 +50,13 @@ class ObjectificationModule(nn.Module):
         local = self._local_losses(next_O_t - O_t, delta_O_pred, slot_weight)
         rel = self._relational_losses(O_t, next_O_t, pred_next, z_eff, local["target_slot_prob"], slot_weight)
 
-        loss_obj_stable = self.w_match * stable["loss_match"] + self.w_temp * stable["loss_temp"] + self.w_smooth * stable["loss_smooth"]
+        loss_obj_stable = (
+            self.w_match * stable["loss_match"]
+            + self.w_temp * stable["loss_temp"]
+            + self.w_smooth * stable["loss_smooth"]
+            + self.w_cycle * stable["loss_cycle"]
+            + self.w_contrast * stable["loss_contrast"]
+        )
         loss_obj_local = self.w_sparse * local["loss_sparse"] + self.w_conc * local["loss_conc"] + self.w_cf * local["loss_cf"]
         loss_obj_rel = self.w_pair * rel["loss_pair"] + self.w_motif * rel["loss_motif"] + self.w_reuse * rel["loss_reuse"]
 
@@ -57,6 +67,8 @@ class ObjectificationModule(nn.Module):
             "loss_obj_rel": loss_obj_rel,
             "objectness_score": m_obj,
             "slot_match_score": stable["match_score"],
+            "slot_cycle_score": stable["cycle_score"],
+            "slot_identity_score": stable["identity_score"],
             "slot_concentration": local["slot_concentration"],
             "motif_usage_entropy": rel["motif_usage_entropy"],
         }
@@ -75,8 +87,10 @@ class ObjectificationModule(nn.Module):
     def _stable_losses(self, O_t, next_O_t, pred_next, event_target, slot_weight):
         current = F.normalize(self.slot_proj(O_t), dim=-1)
         nxt = F.normalize(self.slot_proj(next_O_t), dim=-1)
-        match = soft_slot_alignment(current, nxt, self.temperature)
+        match = soft_slot_alignment(current, nxt, self.temperature, sinkhorn_iters=self.sinkhorn_iters)
+        backward_match = soft_slot_alignment(nxt, current, self.temperature, sinkhorn_iters=self.sinkhorn_iters)
         aligned_next = align_slots(match, next_O_t)
+        aligned_next_proj = align_slots(match, nxt)
 
         match_err = F.smooth_l1_loss(pred_next, aligned_next, reduction="none").mean(dim=-1)
         temp_err = 1.0 - F.cosine_similarity(pred_next, aligned_next, dim=-1)
@@ -89,12 +103,37 @@ class ObjectificationModule(nn.Module):
         if slot_weight is not None:
             smooth_weight = smooth_weight * slot_weight
         loss_smooth = self._weighted_mean(smooth, smooth_weight)
+
+        cycle = torch.matmul(match, backward_match)
+        identity = torch.eye(self.obj_slots, device=cycle.device, dtype=cycle.dtype)
+        cycle_err = (cycle - identity).pow(2)
+        if slot_weight is None:
+            loss_cycle = cycle_err.mean()
+        else:
+            pair_weight = slot_weight.unsqueeze(-1) * slot_weight.unsqueeze(-2)
+            loss_cycle = self._weighted_mean(cycle_err, pair_weight)
+
+        contrast_logits = torch.einsum("...id,...jd->...ij", current, aligned_next_proj)
+        contrast_logits = contrast_logits / max(1e-6, self.identity_temperature)
+        flat_logits = contrast_logits.reshape(-1, self.obj_slots, self.obj_slots)
+        flat_targets = torch.arange(self.obj_slots, device=flat_logits.device).unsqueeze(0).expand(flat_logits.shape[0], -1)
+        contrast_err = F.cross_entropy(flat_logits.reshape(-1, self.obj_slots), flat_targets.reshape(-1), reduction="none")
+        if slot_weight is None:
+            loss_contrast = contrast_err.mean()
+        else:
+            contrast_weight = slot_weight.reshape(-1, self.obj_slots).reshape(-1).to(contrast_err.dtype)
+            loss_contrast = (contrast_err * contrast_weight).sum() / contrast_weight.sum().clamp_min(1e-6)
+
         match_score = match_confidence(match)
         return {
             "loss_match": loss_match,
             "loss_temp": loss_temp,
             "loss_smooth": loss_smooth,
+            "loss_cycle": loss_cycle,
+            "loss_contrast": loss_contrast,
             "match_score": match_score,
+            "cycle_score": torch.clamp(1.0 - loss_cycle.detach(), 0.0, 1.0),
+            "identity_score": torch.clamp(torch.exp(-loss_contrast.detach()), 0.0, 1.0),
         }
 
     def _local_losses(self, target_delta_O, delta_O_pred, slot_weight):

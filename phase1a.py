@@ -65,6 +65,8 @@ class StructuredReadout(nn.Module):
         self.global_dim = int(config.global_dim)
         self.rule_dim = int(config.rule_dim)
         self.spatial_shape = tuple(spatial_shape) if spatial_shape is not None else None
+        self.query_track_blend = float(getattr(config, "query_track_blend", 0.5))
+        self.query_track_stopgrad = bool(getattr(config, "query_track_stopgrad", True))
 
         self.trunk, out_dim = _build_mlp(feat_dim, int(config.hidden), int(config.layers), act_name, use_norm)
         if self.spatial_shape is None:
@@ -87,6 +89,7 @@ class StructuredReadout(nn.Module):
             self.global_head = nn.Linear(out_dim + int(config.hidden), self.global_dim, bias=True)
             self.rule_head = nn.Linear(out_dim + int(config.hidden), self.rule_dim, bias=True)
             self.slot_queries = nn.Parameter(torch.empty(self.obj_slots, int(config.hidden)))
+            self.prev_obj_proj = nn.Linear(self.obj_dim, int(config.hidden), bias=False)
 
         self.map_recon = nn.Linear(self.map_slots * self.map_dim, feat_dim, bias=True)
         self.obj_recon = nn.Linear(self.obj_slots * self.obj_dim, feat_dim, bias=True)
@@ -94,6 +97,80 @@ class StructuredReadout(nn.Module):
         self.apply(tools.weight_init_)
         if self.spatial_shape is not None:
             nn.init.normal_(self.slot_queries, std=0.02)
+
+    def _dynamic_slot_queries(self, prev_slots, dtype):
+        static_queries = self.slot_queries.to(dtype).unsqueeze(0)
+        if prev_slots is None:
+            return static_queries
+        tracked_slots = prev_slots.detach() if self.query_track_stopgrad else prev_slots
+        tracked_queries = self.prev_obj_proj(tracked_slots)
+        blend = max(0.0, min(1.0, self.query_track_blend))
+        return (1.0 - blend) * static_queries + blend * tracked_queries
+
+    def _readout_from_spatial(self, hidden, spatial_hidden, spatial_mask):
+        single_step = hidden.dim() == 2
+        if single_step:
+            hidden = hidden.unsqueeze(1)
+            spatial_hidden = spatial_hidden.unsqueeze(1)
+            spatial_mask = spatial_mask.unsqueeze(1)
+
+        batch_shape = hidden.shape[:-2]
+        steps = hidden.shape[-2]
+        hidden_flat = hidden.reshape(-1, steps, hidden.shape[-1])
+        spatial_flat = spatial_hidden.reshape(-1, steps, *spatial_hidden.shape[-3:])
+        mask_flat = spatial_mask.reshape(-1, steps, *spatial_mask.shape[-3:])
+
+        maps = []
+        objects = []
+        globals_ = []
+        rules = []
+        prev_slots = None
+
+        for index in range(steps):
+            hidden_t = hidden_flat[:, index]
+            spatial_t = spatial_flat[:, index]
+            mask_t = mask_flat[:, index]
+
+            token_feat = spatial_t.reshape(spatial_t.shape[0], -1, spatial_t.shape[-1])
+            token_weight = mask_t.reshape(mask_t.shape[0], -1, 1)
+            norm_weight = token_weight / token_weight.sum(dim=-2, keepdim=True).clamp_min(1e-6)
+            global_summary = (token_feat * norm_weight).sum(dim=-2)
+
+            map_tokens = _pool_spatial_to_slots(spatial_t, self.map_slots)
+            map_tokens = map_tokens + self.map_context(hidden_t).reshape(hidden_t.shape[0], self.map_slots, -1)
+            map_out = torch.tanh(self.map_head(map_tokens))
+
+            slot_queries = self._dynamic_slot_queries(prev_slots, token_feat.dtype)
+            attn_logits = torch.einsum("bnd,bsd->bsn", token_feat, slot_queries)
+            attn_logits = attn_logits / math.sqrt(float(token_feat.shape[-1]))
+            attn = torch.softmax(attn_logits, dim=-1) * token_weight.squeeze(-1).unsqueeze(-2)
+            attn = attn / attn.sum(dim=-1, keepdim=True).clamp_min(1e-6)
+            pooled_obj_tokens = _pool_spatial_to_slots(spatial_t, self.obj_slots)
+            obj_tokens = 0.5 * (torch.einsum("bsn,bnd->bsd", attn, token_feat) + pooled_obj_tokens)
+            obj_tokens = obj_tokens + self.obj_context(hidden_t).reshape(hidden_t.shape[0], self.obj_slots, -1)
+            obj_out = torch.tanh(self.obj_head(obj_tokens))
+
+            global_input = torch.cat([hidden_t, global_summary], dim=-1)
+            global_out = torch.tanh(self.global_head(global_input))
+            rule_out = torch.tanh(self.rule_head(global_input))
+
+            maps.append(map_out)
+            objects.append(obj_out)
+            globals_.append(global_out)
+            rules.append(rule_out)
+            prev_slots = obj_out
+
+        M_t = torch.stack(maps, dim=1).reshape(*batch_shape, steps, self.map_slots, self.map_dim)
+        O_t = torch.stack(objects, dim=1).reshape(*batch_shape, steps, self.obj_slots, self.obj_dim)
+        g_t = torch.stack(globals_, dim=1).reshape(*batch_shape, steps, self.global_dim)
+        rho_t = torch.stack(rules, dim=1).reshape(*batch_shape, steps, self.rule_dim)
+
+        if single_step:
+            M_t = M_t.squeeze(1)
+            O_t = O_t.squeeze(1)
+            g_t = g_t.squeeze(1)
+            rho_t = rho_t.squeeze(1)
+        return M_t, O_t, g_t, rho_t
 
     def forward(self, feat, valid_mask=None, spatial=None):
         hidden = self.trunk(feat)
@@ -125,27 +202,7 @@ class StructuredReadout(nn.Module):
                 )
             else:
                 spatial_mask = _resize_mask_to_spatial(valid_mask, spatial.shape[-3:-1]).to(feat.dtype)
-            token_feat = spatial_hidden.reshape(*batch_shape, -1, spatial_hidden.shape[-1])
-            token_weight = spatial_mask.reshape(*batch_shape, -1, 1)
-            norm_weight = token_weight / token_weight.sum(dim=-2, keepdim=True).clamp_min(1e-6)
-            global_summary = (token_feat * norm_weight).sum(dim=-2)
-
-            map_tokens = _pool_spatial_to_slots(spatial_hidden, self.map_slots)
-            map_tokens = map_tokens + self.map_context(hidden).reshape(*batch_shape, self.map_slots, -1)
-            M_t = torch.tanh(self.map_head(map_tokens))
-
-            attn_logits = torch.einsum("...nd,sd->...sn", token_feat, self.slot_queries)
-            attn_logits = attn_logits / math.sqrt(float(token_feat.shape[-1]))
-            attn = torch.softmax(attn_logits, dim=-1) * token_weight.squeeze(-1).unsqueeze(-2)
-            attn = attn / attn.sum(dim=-1, keepdim=True).clamp_min(1e-6)
-            pooled_obj_tokens = _pool_spatial_to_slots(spatial_hidden, self.obj_slots)
-            obj_tokens = 0.5 * (torch.einsum("...sn,...nd->...sd", attn, token_feat) + pooled_obj_tokens)
-            obj_tokens = obj_tokens + self.obj_context(hidden).reshape(*batch_shape, self.obj_slots, -1)
-            O_t = torch.tanh(self.obj_head(obj_tokens))
-
-            global_input = torch.cat([hidden, global_summary], dim=-1)
-            g_t = torch.tanh(self.global_head(global_input))
-            rho_t = torch.tanh(self.rule_head(global_input))
+            M_t, O_t, g_t, rho_t = self._readout_from_spatial(hidden, spatial_hidden, spatial_mask)
         else:
             M_t = torch.tanh(self.map_head(hidden)).reshape(*batch_shape, self.map_slots, self.map_dim)
             O_t = torch.tanh(self.obj_head(hidden)).reshape(*batch_shape, self.obj_slots, self.obj_dim)

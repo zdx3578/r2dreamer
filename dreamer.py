@@ -682,6 +682,8 @@ class Dreamer(nn.Module):
         metrics = {
             "phase1b/m_obj": out["objectness_score"],
             "phase1b/slot_match": out["slot_match_score"],
+            "phase1b/slot_cycle": out["slot_cycle_score"],
+            "phase1b/slot_identity": out["slot_identity_score"],
             "phase1b/slot_concentration": out["slot_concentration"],
             "phase1b/motif_entropy": out["motif_usage_entropy"],
         }

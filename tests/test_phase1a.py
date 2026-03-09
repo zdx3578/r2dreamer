@@ -9,6 +9,7 @@ from tensordict import TensorDict
 
 from arc3_grid_encoder import Arc3GridEncoder
 from dreamer import Dreamer
+from utils.slot_matching import soft_slot_alignment
 
 
 class BoxSpace:
@@ -215,6 +216,8 @@ def make_model_config(cnn_keys, mlp_keys, arc3_grid_keys="^$", use_objectificati
                 "obj_dim": 8,
                 "global_dim": 12,
                 "rule_dim": 12,
+                "query_track_blend": 0.5,
+                "query_track_stopgrad": True,
             },
             "effect_model": {"layers": 2, "hidden": 32, "latent_dim": 24},
             "effect_heads": {"layers": 1, "hidden": 24},
@@ -225,10 +228,14 @@ def make_model_config(cnn_keys, mlp_keys, arc3_grid_keys="^$", use_objectificati
                 "relation_dim": 16,
                 "num_motifs": 4,
                 "temperature": 0.5,
+                "identity_temperature": 0.25,
                 "ema_decay": 0.99,
+                "sinkhorn_iters": 10,
                 "w_match": 1.0,
                 "w_temp": 1.0,
                 "w_smooth": 0.5,
+                "w_cycle": 0.5,
+                "w_contrast": 0.5,
                 "w_sparse": 1.0,
                 "w_conc": 1.0,
                 "w_cf": 0.5,
@@ -322,6 +329,8 @@ class Phase1ATest(unittest.TestCase):
         if use_objectification:
             self.assertIn("loss/obj_stable", metrics)
             self.assertIn("phase1b/m_obj", metrics)
+            self.assertIn("phase1b/slot_cycle", metrics)
+            self.assertIn("phase1b/slot_identity", metrics)
         if use_phase2:
             self.assertIn("loss/op_assign", metrics)
             self.assertIn("phase2/operator_entropy", metrics)
@@ -479,6 +488,13 @@ class Phase1ATest(unittest.TestCase):
         self.assertTrue(bool(cfg.model.use_binding_head))
         self.assertTrue(bool(cfg.model.use_signature_head))
         self.assertTrue(bool(cfg.model.use_rule_update))
+
+    def test_sinkhorn_slot_alignment_is_doubly_stochastic(self):
+        current = torch.tensor([[[1.0, 0.0], [0.0, 1.0]]], dtype=torch.float32)
+        nxt = torch.tensor([[[0.8, 0.2], [0.1, 0.9]]], dtype=torch.float32)
+        match = soft_slot_alignment(current, nxt, temperature=0.25, sinkhorn_iters=32)
+        torch.testing.assert_close(match.sum(dim=-1), torch.ones_like(match.sum(dim=-1)), atol=5e-3, rtol=5e-3)
+        torch.testing.assert_close(match.sum(dim=-2), torch.ones_like(match.sum(dim=-2)), atol=5e-3, rtol=5e-3)
 
 
 if __name__ == "__main__":

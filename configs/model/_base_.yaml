@@ -84,6 +84,8 @@ structured_readout:
   obj_dim: 32
   global_dim: 64
   rule_dim: 64
+  query_track_blend: 0.5
+  query_track_stopgrad: True
 
 effect_model:
   layers: 2
@@ -107,10 +109,14 @@ objectification:
   relation_dim: ${model.units}
   num_motifs: 8
   temperature: 0.5
+  identity_temperature: 0.25
   ema_decay: 0.99
+  sinkhorn_iters: 10
   w_match: 1.0
   w_temp: 1.0
   w_smooth: 0.5
+  w_cycle: 0.5
+  w_contrast: 0.5
   w_sparse: 1.0
   w_conc: 1.0
   w_cf: 0.5
