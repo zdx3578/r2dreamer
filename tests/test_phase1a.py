@@ -96,14 +96,17 @@ def make_model_config(cnn_keys, mlp_keys, arc3_grid_keys="^$", use_objectificati
                 "obj_local": 0.25,
                 "obj_rel": 0.25,
                 "op_assign": 0.1,
+                "op_top1": 0.1,
                 "op_proto": 0.1,
                 "op_reuse": 0.1,
+                "op_entropy": 0.05,
                 "bind_ce": 0.1,
                 "bind_consistency": 0.1,
                 "sig_scope": 0.1,
                 "sig_duration": 0.1,
                 "sig_impact": 0.1,
                 "rule_update": 0.1,
+                "memory_read": 0.1,
                 "rule_apply": 0.1,
             },
             "r2dreamer": {"lambd": 5e-4},
@@ -127,7 +130,10 @@ def make_model_config(cnn_keys, mlp_keys, arc3_grid_keys="^$", use_objectificati
                 "match_margin_threshold": 0.02,
                 "memory_write_operator_threshold": 0.14,
                 "memory_write_binding_threshold": 0.30,
-                "memory_retrieve_temperature": 1.0,
+                "memory_retrieve_temperature": 0.5,
+                "memory_usage_logit_scale": 0.5,
+                "memory_conf_logit_scale": 1.0,
+                "memory_signature_logit_scale": 1.0,
                 "memory_ema_decay": 0.99,
                 "use_memory_fusion": True,
             },
@@ -376,12 +382,18 @@ class Phase1ATest(unittest.TestCase):
             self.assertIn("phase1b/obj_stable_scale", metrics)
         if use_phase2:
             self.assertIn("loss/op_assign", metrics)
+            self.assertIn("loss/op_top1", metrics)
+            self.assertIn("loss/op_entropy", metrics)
+            self.assertIn("loss/memory_read", metrics)
             self.assertIn("loss/rule_apply", metrics)
             self.assertIn("phase2/operator_entropy", metrics)
             self.assertIn("phase2/match_gate_scale", metrics)
             self.assertIn("phase2/operator_top1_conf", metrics)
+            self.assertIn("phase2/operator_margin", metrics)
             self.assertIn("phase2/binding_top1_conf", metrics)
             self.assertIn("phase2/memory_conf", metrics)
+            self.assertIn("phase2/retrieval_peak", metrics)
+            self.assertIn("phase2/memory_read_error", metrics)
             self.assertIn("phase2/rule_apply_error", metrics)
             self.assertIn("phase2/rule_memory_write_rate", metrics)
         self.assertEqual(replay.updated[0].shape[:2], first_obs.shape[:2])

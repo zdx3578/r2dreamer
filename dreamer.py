@@ -265,6 +265,8 @@ class Dreamer(nn.Module):
             self._loss_scales.setdefault("op_assign", 1.0)
             self._loss_scales.setdefault("op_proto", 1.0)
             self._loss_scales.setdefault("op_reuse", 1.0)
+            self._loss_scales.setdefault("op_top1", 1.0)
+            self._loss_scales.setdefault("op_entropy", 1.0)
         if self.use_binding_head:
             self.binding_head = binding_head.BindingHead(
                 config.binding_head,
@@ -311,6 +313,7 @@ class Dreamer(nn.Module):
             self.rule_apply = rule_apply.RuleApply(config.phase2)
             modules.update({"rule_memory": self.rule_memory, "rule_apply": self.rule_apply})
             self._loss_scales.setdefault("rule_apply", 1.0)
+            self._loss_scales.setdefault("memory_read", 1.0)
         # count number of parameters in each module
         for key, module in modules.items():
             if isinstance(module, nn.Parameter):
@@ -849,6 +852,7 @@ class Dreamer(nn.Module):
             gate,
         )
         return phase2_artifact.Phase2Artifact(
+            q_u_logits=op_out["q_u_logits"],
             q_u=op_out["q_u"],
             target_q=op_out["target_q"],
             operator_id=operator_id,
@@ -871,6 +875,7 @@ class Dreamer(nn.Module):
             memory_signature_proto=memory_out["memory_signature_proto"],
             memory_conf=memory_out["memory_conf"],
             memory_weights=memory_out["memory_weights"],
+            memory_top_weight=memory_out["memory_top_weight"],
             delta_rule_fused=apply_out["delta_rule_fused"],
             rho_next_pred=apply_out["rho_next_pred"],
             fusion_alpha=apply_out["alpha"],
@@ -882,10 +887,15 @@ class Dreamer(nn.Module):
 
     def _phase2_losses(self, artifact, structured):
         flat_q = artifact.q_u.reshape(-1, artifact.q_u.shape[-1])
+        flat_logits = artifact.q_u_logits.reshape(-1, artifact.q_u_logits.shape[-1])
         flat_eff = artifact.effect_embed.reshape(-1, artifact.effect_embed.shape[-1])
         flat_binding = artifact.q_b.reshape(-1, artifact.q_b.shape[-1])
 
         op_assign = -(artifact.target_q.detach() * torch.log(artifact.q_u + 1e-6)).sum(dim=-1).mean()
+        target_operator = artifact.target_q.detach().argmax(dim=-1).reshape(-1)
+        target_operator_conf = artifact.target_q.detach().max(dim=-1).values.reshape(-1)
+        op_top1 = F.cross_entropy(flat_logits, target_operator, reduction="none")
+        op_top1 = (op_top1 * target_operator_conf).sum() / target_operator_conf.sum().clamp_min(1e-6)
         if flat_q.shape[0] > 1:
             eff_sim = torch.matmul(flat_eff, flat_eff.transpose(0, 1))
             op_sim = torch.matmul(flat_q, flat_q.transpose(0, 1))
@@ -894,6 +904,7 @@ class Dreamer(nn.Module):
             op_proto = torch.zeros_like(op_assign)
         uniform = torch.full_like(artifact.operator_usage, 1.0 / artifact.operator_usage.numel())
         op_reuse = (artifact.operator_usage * (torch.log(artifact.operator_usage + 1e-6) - torch.log(uniform))).sum()
+        op_entropy = -(artifact.q_u * torch.log(artifact.q_u + 1e-6)).sum(dim=-1).mean() / math.log(artifact.q_u.shape[-1])
 
         binding_target = self._binding_proxy(structured)
         bind_ce = -(binding_target.detach() * torch.log(artifact.q_b + 1e-6)).sum(dim=-1).mean()
@@ -908,20 +919,29 @@ class Dreamer(nn.Module):
         rule_update_loss = self._weighted_loss(
             artifact.delta_rule_pred, structured["target_delta_rho"], structured["transition_valid_ratio"], kind="smooth_l1"
         )
+        memory_read_loss = self._weighted_loss(
+            artifact.memory_delta_rule,
+            structured["target_delta_rho"],
+            structured["transition_valid_ratio"] * artifact.memory_conf.detach(),
+            kind="smooth_l1",
+        )
         rule_apply_loss = self._weighted_loss(
             artifact.rho_next_pred, structured["nxt"]["rho_t"], structured["transition_valid_ratio"], kind="smooth_l1"
         )
 
         losses = {
             "op_assign": artifact.gate * op_assign,
+            "op_top1": artifact.gate * op_top1,
             "op_proto": artifact.gate * op_proto,
             "op_reuse": artifact.gate * op_reuse,
+            "op_entropy": artifact.gate * op_entropy,
             "bind_ce": artifact.gate * bind_ce,
             "bind_consistency": artifact.gate * bind_consistency,
             "sig_scope": artifact.gate * sig_scope,
             "sig_duration": artifact.gate * sig_duration,
             "sig_impact": artifact.gate * sig_impact,
             "rule_update": artifact.gate * rule_update_loss,
+            "memory_read": artifact.gate * memory_read_loss,
             "rule_apply": artifact.gate * rule_apply_loss,
         }
         retrieval_agreement = F.cosine_similarity(
@@ -930,6 +950,8 @@ class Dreamer(nn.Module):
             dim=-1,
         )
         retrieval_agreement = 0.5 * (1.0 + retrieval_agreement).mean()
+        top2 = torch.topk(artifact.q_u, k=min(2, artifact.q_u.shape[-1]), dim=-1).values
+        operator_margin = top2[..., 0] - (top2[..., 1] if top2.shape[-1] > 1 else 0.0)
         metrics = {
             "phase2/gate_scale": artifact.gate,
             "phase2/object_gate_scale": artifact.object_gate,
@@ -939,6 +961,8 @@ class Dreamer(nn.Module):
             "phase2/operator_usage_entropy": artifact.operator_usage_entropy,
             "phase2/operator_usage_max": artifact.operator_usage.max(),
             "phase2/operator_top1_conf": artifact.operator_conf.mean(),
+            "phase2/operator_target_conf": target_operator_conf.mean(),
+            "phase2/operator_margin": operator_margin.mean(),
             "phase2/binding_entropy": -(artifact.q_b * torch.log(artifact.q_b + 1e-6)).sum(dim=-1).mean()
             / math.log(artifact.q_b.shape[-1]),
             "phase2/binding_max": artifact.q_b.max(dim=-1).values.mean(),
@@ -949,7 +973,9 @@ class Dreamer(nn.Module):
             "phase2/signature_std": artifact.q_sigma.std(),
             "phase2/rule_delta_abs": (structured["target_delta_rho"].abs() * structured["transition_valid_ratio"]).mean(),
             "phase2/memory_conf": artifact.memory_conf.mean(),
+            "phase2/retrieval_peak": artifact.memory_top_weight.mean(),
             "phase2/retrieval_agreement": retrieval_agreement,
+            "phase2/memory_read_error": memory_read_loss.detach(),
             "phase2/rule_apply_error": rule_apply_loss.detach(),
             "phase2/pred_delta_rule_abs": artifact.delta_rule_pred.abs().mean(),
             "phase2/retrieved_delta_rule_abs": artifact.memory_delta_rule.abs().mean(),

@@ -14,6 +14,9 @@ class RuleMemory(nn.Module):
         self.rule_dim = int(rule_dim)
         self.ema_decay = float(getattr(config, "memory_ema_decay", 0.99))
         self.retrieve_temperature = float(getattr(config, "memory_retrieve_temperature", 1.0))
+        self.usage_logit_scale = float(getattr(config, "memory_usage_logit_scale", 0.5))
+        self.conf_logit_scale = float(getattr(config, "memory_conf_logit_scale", 0.5))
+        self.signature_logit_scale = float(getattr(config, "memory_signature_logit_scale", 1.0))
 
         self.register_buffer(
             "delta_rule_proto", torch.zeros(self.num_operators, self.num_bindings, self.rule_dim), persistent=True
@@ -26,34 +29,50 @@ class RuleMemory(nn.Module):
 
     def retrieve(self, q_u, q_b, q_sigma=None):
         joint = q_u.unsqueeze(-1) * q_b.unsqueeze(-2)
-        if self.retrieve_temperature != 1.0:
-            joint = joint.clamp_min(1e-6).pow(1.0 / self.retrieve_temperature)
         valid_cells = (self.usage_count > 0).to(joint.dtype)
-        weights = joint * valid_cells
-        denom = weights.sum(dim=(-2, -1), keepdim=True)
-        weights = torch.where(denom > 0, weights / denom.clamp_min(1e-6), torch.zeros_like(weights))
+        joint_logit = torch.log(joint.clamp_min(1e-6))
+
+        usage_prior = torch.log1p(self.usage_count)
+        usage_prior = usage_prior / usage_prior.amax().clamp_min(1.0)
+        conf_prior = self.ema_conf / self.ema_conf.amax().clamp_min(1e-6)
+
+        if q_sigma is None:
+            signature_score = joint.new_ones(joint.shape)
+        else:
+            signature_score = torch.einsum(
+                "...s,ubs->...ub",
+                F.normalize(q_sigma, dim=-1),
+                F.normalize(self.signature_proto + 1e-6, dim=-1),
+            )
+            signature_score = 0.5 * (1.0 + signature_score)
+
+        logits = joint_logit
+        logits = logits + self.usage_logit_scale * usage_prior
+        logits = logits + self.conf_logit_scale * conf_prior
+        logits = logits + self.signature_logit_scale * signature_score
+
+        flat_logits = logits.reshape(*joint.shape[:-2], -1)
+        flat_valid = valid_cells.reshape(1, *([1] * (flat_logits.ndim - 2)), -1).expand_as(flat_logits)
+        masked_logits = torch.where(flat_valid > 0, flat_logits, torch.full_like(flat_logits, -1e9))
+        flat_weights = F.softmax(masked_logits / self.retrieve_temperature, dim=-1)
+        flat_weights = flat_weights * flat_valid
+        flat_weights = flat_weights / flat_weights.sum(dim=-1, keepdim=True).clamp_min(1e-6)
+        weights = flat_weights.reshape_as(joint)
 
         memory_delta_rule = torch.einsum("...ub,ubr->...r", weights, self.delta_rule_proto)
         memory_signature = torch.einsum("...ub,ubs->...s", weights, self.signature_proto)
-        base_conf = torch.einsum("...ub,ub->...", weights, self.ema_conf).unsqueeze(-1)
-
-        if q_sigma is None:
-            signature_agreement = base_conf.new_ones(base_conf.shape)
-        else:
-            signature_agreement = 0.5 * (
-                1.0
-                + F.cosine_similarity(
-                    F.normalize(q_sigma, dim=-1),
-                    F.normalize(memory_signature + 1e-6, dim=-1),
-                    dim=-1,
-                ).unsqueeze(-1)
-            )
-        memory_conf = torch.clamp(base_conf * signature_agreement, 0.0, 1.0)
+        flat_signature = signature_score.reshape_as(flat_logits)
+        flat_conf = conf_prior.reshape(1, *([1] * (flat_logits.ndim - 2)), -1).expand_as(flat_logits)
+        top_weight, top_index = flat_weights.max(dim=-1, keepdim=True)
+        top_conf = flat_conf.gather(-1, top_index)
+        top_signature = flat_signature.gather(-1, top_index)
+        memory_conf = torch.clamp(top_weight * top_conf * top_signature, 0.0, 1.0)
         return {
             "memory_delta_rule": memory_delta_rule,
             "memory_signature_proto": memory_signature,
             "memory_conf": memory_conf,
             "memory_weights": weights,
+            "memory_top_weight": top_weight,
         }
 
     def update(self, q_u, q_b, q_sigma, delta_rule_target, write_mask):

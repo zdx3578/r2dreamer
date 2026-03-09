@@ -56,14 +56,17 @@ loss_scales:
   obj_local: 0.25
   obj_rel: 0.25
   op_assign: 0.1
+  op_top1: 0.05
   op_proto: 0.1
   op_reuse: 0.05
+  op_entropy: 0.02
   bind_ce: 0.05
   bind_consistency: 0.05
   sig_scope: 0.05
   sig_duration: 0.05
   sig_impact: 0.05
   rule_update: 0.1
+  memory_read: 0.05
   rule_apply: 0.1
 
 r2dreamer:
@@ -78,7 +81,10 @@ phase2:
   warmup_updates: 1000
   memory_write_operator_threshold: 0.14
   memory_write_binding_threshold: 0.30
-  memory_retrieve_temperature: 1.0
+  memory_retrieve_temperature: 0.5
+  memory_usage_logit_scale: 0.5
+  memory_conf_logit_scale: 1.0
+  memory_signature_logit_scale: 1.0
   memory_ema_decay: 0.99
   use_memory_fusion: True
 

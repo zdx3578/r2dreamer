@@ -71,6 +71,58 @@ class Phase2RuleExecutionTest(unittest.TestCase):
         torch.testing.assert_close(first["memory_delta_rule"], delta[:1])
         torch.testing.assert_close(second["memory_delta_rule"], delta[1:])
 
+    def test_rule_memory_uses_signature_to_sharpen_retrieval(self):
+        memory = RuleMemory(
+            SimpleNamespace(
+                memory_ema_decay=0.0,
+                memory_retrieve_temperature=0.1,
+                memory_usage_logit_scale=0.0,
+                memory_conf_logit_scale=0.0,
+                memory_signature_logit_scale=4.0,
+            ),
+            num_operators=2,
+            num_bindings=2,
+            signature_dim=3,
+            rule_dim=2,
+        )
+        memory.update(
+            torch.tensor(
+                [
+                    [[1.0, 0.0]],
+                    [[0.0, 1.0]],
+                ]
+            ),
+            torch.tensor(
+                [
+                    [[1.0, 0.0]],
+                    [[0.0, 1.0]],
+                ]
+            ),
+            torch.tensor(
+                [
+                    [[1.0, 0.0, 0.0]],
+                    [[0.0, 1.0, 0.0]],
+                ]
+            ),
+            torch.tensor(
+                [
+                    [[1.0, 0.0]],
+                    [[0.0, 2.0]],
+                ]
+            ),
+            torch.tensor([[[True]], [[True]]]),
+        )
+
+        out = memory.retrieve(
+            torch.tensor([[[0.5, 0.5]]]),
+            torch.tensor([[[0.5, 0.5]]]),
+            torch.tensor([[[1.0, 0.0, 0.0]]]),
+        )
+
+        self.assertGreater(float(out["memory_delta_rule"][0, 0, 0]), 0.9)
+        self.assertLess(float(out["memory_delta_rule"][0, 0, 1]), 0.2)
+        self.assertGreater(float(out["memory_top_weight"].item()), 0.9)
+
     def test_rule_memory_skips_write_when_mask_is_false(self):
         memory = RuleMemory(
             SimpleNamespace(memory_ema_decay=0.0, memory_retrieve_temperature=1.0),

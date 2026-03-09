@@ -5,6 +5,7 @@ import torch
 
 @dataclass
 class Phase2Artifact:
+    q_u_logits: torch.Tensor
     q_u: torch.Tensor
     target_q: torch.Tensor
     operator_id: torch.Tensor
@@ -27,6 +28,7 @@ class Phase2Artifact:
     memory_signature_proto: torch.Tensor
     memory_conf: torch.Tensor
     memory_weights: torch.Tensor
+    memory_top_weight: torch.Tensor
     delta_rule_fused: torch.Tensor
     rho_next_pred: torch.Tensor
     fusion_alpha: torch.Tensor
