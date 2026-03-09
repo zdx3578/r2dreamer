@@ -488,7 +488,7 @@ class Dreamer(nn.Module):
             self.ema_update()
         metrics = {}
         with autocast(device_type=self.device.type, dtype=torch.float16, enabled=self.device.type == "cuda"):
-            (stoch, deter), mets = self._cal_grad(p_data, initial)
+            (stoch, deter), mets, replay_priority = self._cal_grad(p_data, initial)
         self._scaler.unscale_(self._optimizer)  # unscale grads in params
         if self.rep_loss == "dreamerpro" and self._ema_updates < self.freeze_prototypes_iters:
             self._prototypes.grad.zero_()
@@ -515,7 +515,12 @@ class Dreamer(nn.Module):
             mets["opt/update_rms"] = update_rms
         metrics.update(mets)
         # update latent vectors in replay buffer
-        replay_buffer.update(index, stoch.detach(), deter.detach())
+        replay_buffer.update(
+            index,
+            stoch.detach(),
+            deter.detach(),
+            priority=None if replay_priority is None else replay_priority.detach(),
+        )
         return metrics
 
     def _build_structured_context(self, feat, data, initial, encoder_aux=None):
@@ -583,6 +588,7 @@ class Dreamer(nn.Module):
                     "effect_out": effect_out,
                     "target_delta_M": target_delta_M,
                     "target_delta_O": target_delta_O,
+                    "delta_struct": delta_struct.detach(),
                     "event_target": event_target,
                     "reward_target": reward_target,
                     "terminal_target": terminal_target,
@@ -624,6 +630,7 @@ class Dreamer(nn.Module):
         metrics["phase1a/obj_std"] = readouts["O_t"].std()
         metrics["phase1a/global_std"] = readouts["g_t"].std()
         metrics["phase1a/rule_std"] = readouts["rho_t"].std()
+        metrics["phase1a/slot_carry_confidence"] = readouts["slot_carry_confidence"].mean()
 
         target_delta_g = structured["target_delta_g"]
         if self.use_effect_model:
@@ -695,6 +702,8 @@ class Dreamer(nn.Module):
             "phase1b/slot_match_margin_score": out["slot_match_margin_score"],
             "phase1b/slot_cycle": out["slot_cycle_score"],
             "phase1b/slot_identity": out["slot_identity_score"],
+            "phase1b/slot_teacher": out["slot_teacher_score"],
+            "phase1b/slot_multistep": out["slot_multistep_score"],
             "phase1b/slot_concentration": out["slot_concentration"],
             "phase1b/motif_entropy": out["motif_usage_entropy"],
             "phase1b/object_interface": out["object_interface_score"],
@@ -703,6 +712,21 @@ class Dreamer(nn.Module):
             "phase1b/obj_rel_scale": losses["obj_rel"].new_tensor(self._loss_scale_for("obj_rel")),
         }
         return losses, metrics, out
+
+    def _replay_priorities(self, structured):
+        delta_struct = structured.get("delta_struct")
+        event_target = structured.get("event_target")
+        reward_target = structured.get("reward_target")
+        if delta_struct is None or event_target is None or reward_target is None:
+            return None
+        priority = (
+            1.0
+            + event_target.squeeze(-1).to(delta_struct.dtype)
+            + torch.tanh(2.0 * delta_struct.squeeze(-1))
+            + 0.25 * torch.tanh(2.0 * reward_target.abs().squeeze(-1))
+        )
+        priority = priority * structured["transition_valid_ratio"].squeeze(-1).clamp_min(0.25)
+        return priority.detach().clamp_min(1e-4)
 
     def _loss_scale_for(self, name):
         scale = float(self._loss_scales[name])
@@ -976,6 +1000,12 @@ class Dreamer(nn.Module):
                 phase2_losses, phase2_metrics = self._phase2_losses(structured, data)
                 losses.update(phase2_losses)
                 metrics.update(phase2_metrics)
+            replay_priority = self._replay_priorities(structured)
+            if replay_priority is not None:
+                metrics["replay/priority_mean"] = replay_priority.mean()
+                metrics["replay/priority_max"] = replay_priority.max()
+        else:
+            replay_priority = None
 
         # === Imagination rollout for actor-critic ===
         # (B*T, S, K), (B*T, D)
@@ -1070,7 +1100,7 @@ class Dreamer(nn.Module):
 
         metrics.update({f"loss/{name}": loss for name, loss in losses.items()})
         metrics.update({"opt/loss": total_loss})
-        return (post_stoch, post_deter), metrics
+        return (post_stoch, post_deter), metrics, replay_priority
 
     def _seq_scalar(self, value):
         value = to_f32(value)

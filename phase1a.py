@@ -67,6 +67,8 @@ class StructuredReadout(nn.Module):
         self.spatial_shape = tuple(spatial_shape) if spatial_shape is not None else None
         self.query_track_blend = float(getattr(config, "query_track_blend", 0.5))
         self.query_track_stopgrad = bool(getattr(config, "query_track_stopgrad", True))
+        self.query_conf_threshold = float(getattr(config, "query_conf_threshold", 0.15))
+        self.query_conf_sharpness = float(getattr(config, "query_conf_sharpness", 8.0))
 
         self.trunk, out_dim = _build_mlp(feat_dim, int(config.hidden), int(config.layers), act_name, use_norm)
         if self.spatial_shape is None:
@@ -98,14 +100,19 @@ class StructuredReadout(nn.Module):
         if self.spatial_shape is not None:
             nn.init.normal_(self.slot_queries, std=0.02)
 
-    def _dynamic_slot_queries(self, prev_slots, dtype):
+    def _dynamic_slot_queries(self, prev_slots, prev_confidence, dtype):
         static_queries = self.slot_queries.to(dtype).unsqueeze(0)
         if prev_slots is None:
             return static_queries
         tracked_slots = prev_slots.detach() if self.query_track_stopgrad else prev_slots
         tracked_queries = self.prev_obj_proj(tracked_slots)
         blend = max(0.0, min(1.0, self.query_track_blend))
-        return (1.0 - blend) * static_queries + blend * tracked_queries
+        if prev_confidence is None:
+            carry_gate = tracked_queries.new_ones(tracked_queries.shape[:-1] + (1,))
+        else:
+            carry_gate = torch.sigmoid((prev_confidence.to(dtype) - self.query_conf_threshold) * self.query_conf_sharpness)
+        carry_blend = blend * carry_gate
+        return (1.0 - carry_blend) * static_queries + carry_blend * tracked_queries
 
     def _readout_from_spatial(self, hidden, spatial_hidden, spatial_mask):
         single_step = hidden.dim() == 2
@@ -125,6 +132,8 @@ class StructuredReadout(nn.Module):
         globals_ = []
         rules = []
         prev_slots = None
+        prev_confidence = None
+        carry_confidences = []
 
         for index in range(steps):
             hidden_t = hidden_flat[:, index]
@@ -140,11 +149,13 @@ class StructuredReadout(nn.Module):
             map_tokens = map_tokens + self.map_context(hidden_t).reshape(hidden_t.shape[0], self.map_slots, -1)
             map_out = torch.tanh(self.map_head(map_tokens))
 
-            slot_queries = self._dynamic_slot_queries(prev_slots, token_feat.dtype)
+            slot_queries = self._dynamic_slot_queries(prev_slots, prev_confidence, token_feat.dtype)
             attn_logits = torch.einsum("bnd,bsd->bsn", token_feat, slot_queries)
             attn_logits = attn_logits / math.sqrt(float(token_feat.shape[-1]))
             attn = torch.softmax(attn_logits, dim=-1) * token_weight.squeeze(-1).unsqueeze(-2)
             attn = attn / attn.sum(dim=-1, keepdim=True).clamp_min(1e-6)
+            attn_entropy = -(attn * torch.log(attn + 1e-6)).sum(dim=-1, keepdim=True) / math.log(float(attn.shape[-1]))
+            carry_confidence = 0.5 * (attn.max(dim=-1, keepdim=True).values + (1.0 - attn_entropy))
             pooled_obj_tokens = _pool_spatial_to_slots(spatial_t, self.obj_slots)
             obj_tokens = 0.5 * (torch.einsum("bsn,bnd->bsd", attn, token_feat) + pooled_obj_tokens)
             obj_tokens = obj_tokens + self.obj_context(hidden_t).reshape(hidden_t.shape[0], self.obj_slots, -1)
@@ -159,18 +170,22 @@ class StructuredReadout(nn.Module):
             globals_.append(global_out)
             rules.append(rule_out)
             prev_slots = obj_out
+            prev_confidence = carry_confidence
+            carry_confidences.append(carry_confidence)
 
         M_t = torch.stack(maps, dim=1).reshape(*batch_shape, steps, self.map_slots, self.map_dim)
         O_t = torch.stack(objects, dim=1).reshape(*batch_shape, steps, self.obj_slots, self.obj_dim)
         g_t = torch.stack(globals_, dim=1).reshape(*batch_shape, steps, self.global_dim)
         rho_t = torch.stack(rules, dim=1).reshape(*batch_shape, steps, self.rule_dim)
+        carry_conf = torch.stack(carry_confidences, dim=1).reshape(*batch_shape, steps, self.obj_slots, 1)
 
         if single_step:
             M_t = M_t.squeeze(1)
             O_t = O_t.squeeze(1)
             g_t = g_t.squeeze(1)
             rho_t = rho_t.squeeze(1)
-        return M_t, O_t, g_t, rho_t
+            carry_conf = carry_conf.squeeze(1)
+        return M_t, O_t, g_t, rho_t, carry_conf
 
     def forward(self, feat, valid_mask=None, spatial=None):
         hidden = self.trunk(feat)
@@ -202,12 +217,13 @@ class StructuredReadout(nn.Module):
                 )
             else:
                 spatial_mask = _resize_mask_to_spatial(valid_mask, spatial.shape[-3:-1]).to(feat.dtype)
-            M_t, O_t, g_t, rho_t = self._readout_from_spatial(hidden, spatial_hidden, spatial_mask)
+            M_t, O_t, g_t, rho_t, carry_conf = self._readout_from_spatial(hidden, spatial_hidden, spatial_mask)
         else:
             M_t = torch.tanh(self.map_head(hidden)).reshape(*batch_shape, self.map_slots, self.map_dim)
             O_t = torch.tanh(self.obj_head(hidden)).reshape(*batch_shape, self.obj_slots, self.obj_dim)
             g_t = torch.tanh(self.global_head(hidden))
             rho_t = torch.tanh(self.rule_head(hidden))
+            carry_conf = torch.ones(*batch_shape, self.obj_slots, 1, device=feat.device, dtype=feat.dtype)
 
         map_gate = 0.25 + 0.75 * map_mask
         obj_gate = 0.25 + 0.75 * obj_mask
@@ -228,6 +244,7 @@ class StructuredReadout(nn.Module):
             "map_mask": map_mask,
             "obj_mask": obj_mask,
             "valid_ratio": valid_ratio,
+            "slot_carry_confidence": carry_conf,
             "M_recon": self.map_recon(map_flat),
             "O_recon": self.obj_recon(obj_flat),
             "g_rho_recon": self.global_recon(global_flat),

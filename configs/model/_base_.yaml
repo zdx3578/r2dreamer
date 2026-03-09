@@ -87,6 +87,8 @@ structured_readout:
   rule_dim: 64
   query_track_blend: 0.5
   query_track_stopgrad: True
+  query_conf_threshold: 0.15
+  query_conf_sharpness: 8.0
 
 effect_model:
   layers: 2
@@ -122,6 +124,9 @@ objectification:
   w_smooth: 0.5
   w_cycle: 0.5
   w_contrast: 0.5
+  w_teacher: 0.5
+  w_multistep: 0.5
+  multistep_offset: 2
   w_sparse: 1.0
   w_conc: 1.0
   w_cf: 0.5

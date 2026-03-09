@@ -27,6 +27,7 @@ class FakeReplayBuffer:
         self._data = data
         self._initial = initial
         self.updated = None
+        self.updated_priority = None
 
     def sample(self):
         batch_shape = self._data.shape
@@ -36,8 +37,9 @@ class FakeReplayBuffer:
         ]
         return self._data.clone(), index, (self._initial[0].clone(), self._initial[1].clone())
 
-    def update(self, index, stoch, deter):
+    def update(self, index, stoch, deter, priority=None):
         self.updated = (stoch.clone(), deter.clone())
+        self.updated_priority = None if priority is None else priority.clone()
 
 
 def make_model_config(cnn_keys, mlp_keys, arc3_grid_keys="^$", use_objectification=False, use_phase2=False):
@@ -218,6 +220,8 @@ def make_model_config(cnn_keys, mlp_keys, arc3_grid_keys="^$", use_objectificati
                 "rule_dim": 12,
                 "query_track_blend": 0.5,
                 "query_track_stopgrad": True,
+                "query_conf_threshold": 0.15,
+                "query_conf_sharpness": 8.0,
             },
             "effect_model": {"layers": 2, "hidden": 32, "latent_dim": 24},
             "effect_heads": {"layers": 1, "hidden": 24},
@@ -240,6 +244,9 @@ def make_model_config(cnn_keys, mlp_keys, arc3_grid_keys="^$", use_objectificati
                 "w_smooth": 0.5,
                 "w_cycle": 0.5,
                 "w_contrast": 0.5,
+                "w_teacher": 0.5,
+                "w_multistep": 0.5,
+                "multistep_offset": 2,
                 "w_sparse": 1.0,
                 "w_conc": 1.0,
                 "w_cf": 0.5,
@@ -330,6 +337,8 @@ class Phase1ATest(unittest.TestCase):
         self.assertIn("loss/delta_map", metrics)
         self.assertIn("loss/goal", metrics)
         self.assertIn("phase1a/map_std", metrics)
+        self.assertIn("phase1a/slot_carry_confidence", metrics)
+        self.assertIn("replay/priority_mean", metrics)
         if use_objectification:
             self.assertIn("loss/obj_stable", metrics)
             self.assertIn("phase1b/m_obj", metrics)
@@ -337,6 +346,8 @@ class Phase1ATest(unittest.TestCase):
             self.assertIn("phase1b/slot_match_margin", metrics)
             self.assertIn("phase1b/slot_cycle", metrics)
             self.assertIn("phase1b/slot_identity", metrics)
+            self.assertIn("phase1b/slot_teacher", metrics)
+            self.assertIn("phase1b/slot_multistep", metrics)
             self.assertIn("phase1b/object_interface", metrics)
             self.assertIn("phase1b/obj_stable_scale", metrics)
         if use_phase2:
@@ -345,6 +356,7 @@ class Phase1ATest(unittest.TestCase):
             self.assertIn("phase2/match_gate_scale", metrics)
         self.assertEqual(replay.updated[0].shape[:2], first_obs.shape[:2])
         self.assertEqual(replay.updated[1].shape[:2], first_obs.shape[:2])
+        self.assertIsNotNone(replay.updated_priority)
 
         obs_step = {
             key: value[:, 0] for key, value in obs_dict.items()

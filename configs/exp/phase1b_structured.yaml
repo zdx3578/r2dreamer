@@ -6,3 +6,6 @@ model:
   use_goal_progress_head: True
   use_reachability_head: True
   use_objectification: True
+
+buffer:
+  prioritized: True

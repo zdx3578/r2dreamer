@@ -1,6 +1,6 @@
 import torch
 from torchrl.data.replay_buffers import LazyTensorStorage, ReplayBuffer
-from torchrl.data.replay_buffers.samplers import SliceSampler
+from torchrl.data.replay_buffers.samplers import PrioritizedSliceSampler, SliceSampler
 
 
 class Buffer:
@@ -9,12 +9,29 @@ class Buffer:
         self.storage_device = torch.device(config.storage_device)
         self.batch_size = int(config.batch_size)
         self.batch_length = int(config.batch_length)
+        self.prioritized = bool(getattr(config, "prioritized", False))
+        self.priority_eps = float(getattr(config, "priority_eps", 1e-6))
         self.num_eps = 0
+        if self.prioritized:
+            sampler = PrioritizedSliceSampler(
+                max_capacity=int(config.max_size),
+                alpha=float(getattr(config, "priority_alpha", 0.6)),
+                beta=float(getattr(config, "priority_beta", 0.4)),
+                eps=self.priority_eps,
+                reduction=str(getattr(config, "priority_reduction", "max")),
+                num_slices=self.batch_size,
+                end_key=None,
+                traj_key="episode",
+                truncated_key=None,
+                strict_length=True,
+            )
+        else:
+            sampler = SliceSampler(
+                num_slices=self.batch_size, end_key=None, traj_key="episode", truncated_key=None, strict_length=True
+            )
         self._buffer = ReplayBuffer(
             storage=LazyTensorStorage(max_size=config.max_size, device=self.storage_device, ndim=2),
-            sampler=SliceSampler(
-                num_slices=self.batch_size, end_key=None, traj_key="episode", truncated_key=None, strict_length=True
-            ),
+            sampler=sampler,
             prefetch=0,
             batch_size=self.batch_size * (self.batch_length + 1),  # +1 for context
         )
@@ -41,7 +58,7 @@ class Buffer:
         index = [ind.view(-1, self.batch_length + 1)[:, 1:] for ind in info["index"]]
         return data, index, initial
 
-    def update(self, index, stoch, deter):
+    def update(self, index, stoch, deter, priority=None):
         # Flatten the data
         index = [ind.reshape(-1) for ind in index]
         # (B, T, S, K) -> (B*T, S, K)
@@ -51,6 +68,10 @@ class Buffer:
         # In storage, the length is the first dimension, and the batch (number of environments) is the second dimension.
         self._buffer[index[1], index[0]].set_("stoch", stoch)
         self._buffer[index[1], index[0]].set_("deter", deter)
+        if self.prioritized and priority is not None:
+            flat_priority = priority.reshape(-1).detach().to(torch.float32).clamp_min(self.priority_eps)
+            priority_index = torch.stack([index[0], index[1]], dim=-1)
+            self._buffer.update_priority(priority_index, flat_priority)
 
     def count(self):
         if self._buffer.storage.shape is None:

@@ -26,6 +26,9 @@ class ObjectificationModule(nn.Module):
         self.w_smooth = float(config.w_smooth)
         self.w_cycle = float(getattr(config, "w_cycle", 0.5))
         self.w_contrast = float(getattr(config, "w_contrast", 0.5))
+        self.w_teacher = float(getattr(config, "w_teacher", 0.5))
+        self.w_multistep = float(getattr(config, "w_multistep", 0.5))
+        self.multistep_offset = max(2, int(getattr(config, "multistep_offset", 2)))
         self.w_sparse = float(config.w_sparse)
         self.w_conc = float(config.w_conc)
         self.w_cf = float(config.w_cf)
@@ -36,6 +39,8 @@ class ObjectificationModule(nn.Module):
         match_dim = int(config.match_dim)
         rel_dim = int(config.relation_dim)
         self.slot_proj = nn.Linear(self.obj_dim, match_dim, bias=True)
+        self.student_proj = nn.Linear(self.obj_dim, match_dim, bias=False)
+        self.teacher_proj = nn.Linear(self.obj_dim, match_dim, bias=False)
         self.rel_proj = nn.Linear(self.obj_dim, rel_dim, bias=True)
         self.motif_head = nn.Linear(self.effect_dim, self.num_motifs, bias=True)
         self.motif_bank = nn.Parameter(torch.zeros(self.num_motifs, self.obj_slots))
@@ -56,6 +61,8 @@ class ObjectificationModule(nn.Module):
             + self.w_smooth * stable["loss_smooth"]
             + self.w_cycle * stable["loss_cycle"]
             + self.w_contrast * stable["loss_contrast"]
+            + self.w_teacher * stable["loss_teacher"]
+            + self.w_multistep * stable["loss_multistep"]
         )
         loss_obj_local = self.w_sparse * local["loss_sparse"] + self.w_conc * local["loss_conc"] + self.w_cf * local["loss_cf"]
         loss_obj_rel = self.w_pair * rel["loss_pair"] + self.w_motif * rel["loss_motif"] + self.w_reuse * rel["loss_reuse"]
@@ -81,6 +88,8 @@ class ObjectificationModule(nn.Module):
             "slot_match_margin_score": stable["match_margin_score"],
             "slot_cycle_score": stable["cycle_score"],
             "slot_identity_score": stable["identity_score"],
+            "slot_teacher_score": stable["teacher_score"],
+            "slot_multistep_score": stable["multistep_score"],
             "slot_concentration": local["slot_concentration"],
             "motif_usage_entropy": rel["motif_usage_entropy"],
             "object_interface_score": object_interface_score,
@@ -137,6 +146,29 @@ class ObjectificationModule(nn.Module):
             contrast_weight = slot_weight.reshape(-1, self.obj_slots).reshape(-1).to(contrast_err.dtype)
             loss_contrast = (contrast_err * contrast_weight).sum() / contrast_weight.sum().clamp_min(1e-6)
 
+        teacher_target = F.normalize(self.teacher_proj(aligned_next.detach()), dim=-1)
+        student_pred = F.normalize(self.student_proj(pred_next), dim=-1)
+        teacher_err = 1.0 - F.cosine_similarity(student_pred, teacher_target, dim=-1)
+        loss_teacher = self._weighted_mean(teacher_err, slot_weight)
+
+        if current.shape[1] >= self.multistep_offset:
+            current_multi = current[:, :-self.multistep_offset + 1]
+            future_multi = nxt[:, self.multistep_offset - 1 :]
+            match_multi = soft_slot_alignment(
+                current_multi,
+                future_multi,
+                self.temperature,
+                sinkhorn_iters=self.sinkhorn_iters,
+            )
+            aligned_multi = align_slots(match_multi, future_multi)
+            multistep_err = 1.0 - F.cosine_similarity(current_multi, aligned_multi.detach(), dim=-1)
+            multi_weight = None if slot_weight is None else slot_weight[:, :-self.multistep_offset + 1]
+            loss_multistep = self._weighted_mean(multistep_err, multi_weight)
+            multistep_score = torch.clamp(1.0 - loss_multistep.detach(), 0.0, 1.0)
+        else:
+            loss_multistep = loss_match.new_zeros(())
+            multistep_score = loss_match.new_zeros(())
+
         match_score = match_confidence(match)
         match_random_score = self._shuffled_match_baseline(current, nxt)
         match_margin = match_score - match_random_score
@@ -147,12 +179,16 @@ class ObjectificationModule(nn.Module):
             "loss_smooth": loss_smooth,
             "loss_cycle": loss_cycle,
             "loss_contrast": loss_contrast,
+            "loss_teacher": loss_teacher,
+            "loss_multistep": loss_multistep,
             "match_score": match_score,
             "match_random_score": match_random_score,
             "match_margin": match_margin,
             "match_margin_score": match_margin_score,
             "cycle_score": torch.clamp(1.0 - loss_cycle.detach(), 0.0, 1.0),
             "identity_score": torch.clamp(torch.exp(-loss_contrast.detach()), 0.0, 1.0),
+            "teacher_score": torch.clamp(torch.exp(-loss_teacher.detach()), 0.0, 1.0),
+            "multistep_score": multistep_score,
         }
 
     def _shuffled_match_baseline(self, current, nxt):

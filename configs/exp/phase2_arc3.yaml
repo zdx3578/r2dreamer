@@ -14,3 +14,6 @@ model:
     arc3_grid_keys: 'grid'
     arc3_grid:
       num_colors: ${env.num_colors}
+
+buffer:
+  prioritized: True
