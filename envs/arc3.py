@@ -34,7 +34,7 @@ def _extract_action_context(action_input: Any) -> tuple[int, dict[str, Any]]:
     return action_id, data
 
 
-def normalize_arc_frame(frame_any: Any, size: tuple[int, int]) -> np.ndarray:
+def _normalize_frame_list(frame_any: Any) -> list[list[Any]]:
     frame = _to_nested_list(frame_any)
     for _ in range(3):
         if not isinstance(frame, list) or not frame:
@@ -44,11 +44,13 @@ def normalize_arc_frame(frame_any: Any, size: tuple[int, int]) -> np.ndarray:
             frame = first
             continue
         break
+    return frame if isinstance(frame, list) else []
 
+
+def normalize_arc_frame(frame_any: Any, size: tuple[int, int], pad_value: int = 0) -> np.ndarray:
+    frame = _normalize_frame_list(frame_any)
     height, width = map(int, size)
-    grid = np.zeros((height, width), dtype=np.int32)
-    if not isinstance(frame, list):
-        return grid
+    grid = np.full((height, width), int(pad_value), dtype=np.int32)
     for y, row in enumerate(frame[:height]):
         row = _to_nested_list(row)
         if not isinstance(row, list):
@@ -57,19 +59,45 @@ def normalize_arc_frame(frame_any: Any, size: tuple[int, int]) -> np.ndarray:
             try:
                 grid[y, x] = int(value)
             except Exception:
-                grid[y, x] = 0
+                grid[y, x] = int(pad_value)
     return grid
 
 
-def encode_arc_grid(grid: np.ndarray, num_colors: int, encoding: str) -> np.ndarray:
+def extract_arc_frame_metadata(frame_any: Any, size: tuple[int, int], pad_value: int = 0) -> tuple[np.ndarray, np.ndarray, tuple[int, int]]:
+    frame = _normalize_frame_list(frame_any)
+    height, width = map(int, size)
+    actual_h = min(len(frame), height)
+    actual_w = 0
+    for row in frame[:actual_h]:
+        row = _to_nested_list(row)
+        if isinstance(row, list):
+            actual_w = max(actual_w, min(len(row), width))
+
+    grid = np.full((height, width), int(pad_value), dtype=np.int32)
+    valid_mask = np.zeros((height, width), dtype=np.float32)
+    for y, row in enumerate(frame[:height]):
+        row = _to_nested_list(row)
+        if not isinstance(row, list):
+            continue
+        for x, value in enumerate(row[:width]):
+            valid_mask[y, x] = 1.0
+            try:
+                grid[y, x] = int(value)
+            except Exception:
+                grid[y, x] = int(pad_value)
+    return grid, valid_mask, (actual_h, actual_w)
+
+
+def encode_arc_grid(grid: np.ndarray, num_colors: int, encoding: str, num_special_tokens: int = 1) -> np.ndarray:
     grid = np.asarray(grid, dtype=np.int32)
-    grid = np.clip(grid, 0, int(num_colors) - 1)
+    vocab_size = int(num_colors) + int(num_special_tokens)
+    grid = np.clip(grid, 0, vocab_size - 1)
     if encoding == "token":
         return grid[..., None].astype(np.int32)
     if encoding == "onehot":
-        return np.eye(int(num_colors), dtype=np.float32)[grid]
+        return np.eye(vocab_size, dtype=np.float32)[grid]
     if encoding == "scalar":
-        denom = max(1, int(num_colors) - 1)
+        denom = max(1, vocab_size - 1)
         return (grid.astype(np.float32) / float(denom))[..., None]
     raise ValueError(f"Unsupported ARC3 grid encoding: {encoding}")
 
@@ -87,23 +115,35 @@ def encode_state_flags(state_name: str) -> np.ndarray:
     )
 
 
-def encode_arc_state_flags(state_name: str, *, full_reset: bool, action_id: int, action_data: dict[str, Any]) -> np.ndarray:
-    base = encode_state_flags(state_name)
+def encode_arc_state_flags(state_name: str) -> np.ndarray:
+    return encode_state_flags(state_name)
+
+
+def encode_arc_action_context(
+    *,
+    full_reset: bool,
+    action_id: int,
+    action_data: dict[str, Any],
+    action_count: int,
+    size: tuple[int, int],
+) -> np.ndarray:
     has_coords = "x" in action_data and "y" in action_data
-    return np.concatenate(
+    width = max(1, int(size[1]) - 1)
+    height = max(1, int(size[0]) - 1)
+    x = float(_to_int(action_data.get("x", 0), default=0)) / float(width)
+    y = float(_to_int(action_data.get("y", 0), default=0)) / float(height)
+    return np.array(
         [
-            base,
-            np.array(
-                [
-                    float(bool(full_reset)),
-                    float(int(action_id) == 0),
-                    float(int(action_id) == 6),
-                    float(bool(has_coords)),
-                ],
-                dtype=np.float32,
-            ),
+            float(bool(full_reset)),
+            float(int(action_id)) / float(max(1, int(action_count) - 1)),
+            float(int(action_id) == 0),
+            float(int(action_id) == 5),
+            float(int(action_id) == 6),
+            float(bool(has_coords)),
+            float(np.clip(x, 0.0, 1.0)),
+            float(np.clip(y, 0.0, 1.0)),
         ],
-        axis=0,
+        dtype=np.float32,
     )
 
 
@@ -113,18 +153,15 @@ def encode_arc_progress(
     win_levels: int,
     available_actions: list[int],
     action_count: int,
-    action_id: int,
-    action_data: dict[str, Any],
+    frame_shape: tuple[int, int],
     size: tuple[int, int],
 ) -> np.ndarray:
     progress_ratio = float(levels_completed) / float(win_levels) if win_levels > 0 else 0.0
     remaining_ratio = float(max(0, win_levels - levels_completed)) / float(max(1, win_levels))
     action_ratio = float(len(available_actions)) / float(max(1, action_count))
-    action_id_norm = float(action_id) / float(max(1, action_count - 1))
-    width = max(1, int(size[1]) - 1)
-    height = max(1, int(size[0]) - 1)
-    x = float(_to_int(action_data.get("x", 0), default=0)) / float(width)
-    y = float(_to_int(action_data.get("y", 0), default=0)) / float(height)
+    frame_h = float(max(0, int(frame_shape[0]))) / float(max(1, int(size[0])))
+    frame_w = float(max(0, int(frame_shape[1]))) / float(max(1, int(size[1])))
+    area = float(max(0, int(frame_shape[0]) * int(frame_shape[1]))) / float(max(1, int(size[0]) * int(size[1])))
     return np.array(
         [
             float(levels_completed),
@@ -132,9 +169,9 @@ def encode_arc_progress(
             float(progress_ratio),
             float(remaining_ratio),
             float(action_ratio),
-            float(action_id_norm),
-            float(np.clip(x, 0.0, 1.0)),
-            float(np.clip(y, 0.0, 1.0)),
+            float(np.clip(frame_h, 0.0, 1.0)),
+            float(np.clip(frame_w, 0.0, 1.0)),
+            float(np.clip(area, 0.0, 1.0)),
         ],
         dtype=np.float32,
     )
@@ -184,6 +221,8 @@ def derive_arc_reward(
 @dataclass
 class Arc3Transition:
     grid: np.ndarray
+    valid_mask: np.ndarray
+    frame_shape: tuple[int, int]
     state_name: str
     levels_completed: int
     win_levels: int
@@ -236,6 +275,8 @@ class Arc3Grid(gym.Env):
         self._size = tuple(map(int, size))
         self._grid_encoding = str(grid_encoding)
         self._num_colors = int(num_colors)
+        self._num_special_tokens = 1
+        self._pad_token_id = self._num_colors
         self._reward_per_level = float(reward_per_level)
         self._reward_win = float(reward_win)
         self._reward_loss = float(reward_loss)
@@ -254,15 +295,16 @@ class Arc3Grid(gym.Env):
         self.reward_range = [-np.inf, np.inf]
 
         if self._grid_encoding == "token":
-            grid_space = gym.spaces.Box(0, self._num_colors - 1, self._size + (1,), dtype=np.int32)
+            grid_space = gym.spaces.Box(0, self._num_colors + self._num_special_tokens - 1, self._size + (1,), dtype=np.int32)
         else:
-            grid_channels = self._num_colors if self._grid_encoding == "onehot" else 1
+            grid_channels = (self._num_colors + self._num_special_tokens) if self._grid_encoding == "onehot" else 1
             grid_space = gym.spaces.Box(0.0, 1.0, self._size + (grid_channels,), dtype=np.float32)
         self._observation_space = gym.spaces.Dict(
             {
                 "grid": grid_space,
-                "state_flags": gym.spaces.Box(0.0, 1.0, (8,), dtype=np.float32),
+                "state_flags": gym.spaces.Box(0.0, 1.0, (4,), dtype=np.float32),
                 "progress": gym.spaces.Box(-np.inf, np.inf, (8,), dtype=np.float32),
+                "action_context": gym.spaces.Box(-np.inf, np.inf, (8,), dtype=np.float32),
                 "action_mask": gym.spaces.Box(0.0, 1.0, (self._action_count,), dtype=np.float32),
                 "is_first": gym.spaces.Box(0, 1, (), bool),
                 "is_last": gym.spaces.Box(0, 1, (), bool),
@@ -322,6 +364,7 @@ class Arc3Grid(gym.Env):
             "full_reset": bool(transition.full_reset),
             "action_id": int(transition.action_id),
             "action_data": dict(transition.action_data),
+            "frame_shape": tuple(int(v) for v in transition.frame_shape),
         }
         self._last_transition = transition
         return obs, reward, done, info
@@ -384,8 +427,15 @@ class Arc3Grid(gym.Env):
         state_name = getattr(state_obj, "name", str(state_obj))
         available_actions = [int(v) for v in getattr(raw, "available_actions", [])]
         action_id, action_data = _extract_action_context(getattr(raw, "action_input", None))
+        grid, valid_mask, frame_shape = extract_arc_frame_metadata(
+            getattr(raw, "frame", []),
+            self._size,
+            pad_value=self._pad_token_id,
+        )
         transition = Arc3Transition(
-            grid=normalize_arc_frame(getattr(raw, "frame", []), self._size),
+            grid=grid,
+            valid_mask=valid_mask,
+            frame_shape=frame_shape,
             state_name=str(state_name),
             levels_completed=int(getattr(raw, "levels_completed", 0)),
             win_levels=int(getattr(raw, "win_levels", 0)),
@@ -401,20 +451,26 @@ class Arc3Grid(gym.Env):
 
     def _format_obs(self, transition: Arc3Transition, *, is_first: bool, is_last: bool, is_terminal: bool):
         return {
-            "grid": encode_arc_grid(transition.grid, self._num_colors, self._grid_encoding),
-            "state_flags": encode_arc_state_flags(
-                transition.state_name,
-                full_reset=transition.full_reset,
-                action_id=transition.action_id,
-                action_data=transition.action_data,
+            "grid": encode_arc_grid(
+                transition.grid,
+                self._num_colors,
+                self._grid_encoding,
+                num_special_tokens=self._num_special_tokens,
             ),
+            "state_flags": encode_arc_state_flags(transition.state_name),
             "progress": encode_arc_progress(
                 levels_completed=transition.levels_completed,
                 win_levels=transition.win_levels,
                 available_actions=transition.available_actions,
                 action_count=self._action_count,
+                frame_shape=transition.frame_shape,
+                size=self._size,
+            ),
+            "action_context": encode_arc_action_context(
+                full_reset=transition.full_reset,
                 action_id=transition.action_id,
                 action_data=transition.action_data,
+                action_count=self._action_count,
                 size=self._size,
             ),
             "action_mask": encode_action_mask(transition.available_actions, self._action_count),

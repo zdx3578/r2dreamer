@@ -28,11 +28,13 @@ class Arc3GridEncoder(nn.Module):
         act = getattr(torch.nn, config.act)
         h, w, _ = input_shape
         self.num_colors = int(config.num_colors)
+        self.num_special_tokens = int(getattr(config, "num_special_tokens", 1))
+        self.vocab_size = self.num_colors + self.num_special_tokens
         self.token_dim = int(config.token_dim)
         self.depths = tuple(int(config.depth) * int(mult) for mult in list(config.mults))
         self.kernel_size = int(config.kernel_size)
 
-        self.token_embed = nn.Embedding(self.num_colors, self.token_dim)
+        self.token_embed = nn.Embedding(self.vocab_size, self.token_dim)
         self.row_embed = nn.Embedding(h, self.token_dim)
         self.col_embed = nn.Embedding(w, self.token_dim)
 
@@ -76,5 +78,5 @@ class Arc3GridEncoder(nn.Module):
         else:
             token_ids = grid[..., 0]
             if torch.is_floating_point(token_ids):
-                token_ids = torch.round(token_ids * float(max(1, self.num_colors - 1)))
-        return token_ids.long().clamp_(0, self.num_colors - 1)
+                token_ids = torch.round(token_ids * float(max(1, self.vocab_size - 1)))
+        return token_ids.long().clamp_(0, self.vocab_size - 1)

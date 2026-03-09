@@ -11,14 +11,15 @@ device: ${device}
 
 size: [64, 64]
 encoder:
-  mlp_keys: 'state_flags|progress|action_mask'
+  mlp_keys: 'state_flags|progress|action_context|action_mask'
   cnn_keys: 'grid'
 decoder:
-  mlp_keys: 'state_flags|progress|action_mask'
+  mlp_keys: 'state_flags|progress|action_context|action_mask'
   cnn_keys: 'grid'
 
 grid_encoding: token
 num_colors: 16
+num_special_tokens: 1
 reward_per_level: 1.0
 reward_win: 10.0
 reward_loss: 0.0
