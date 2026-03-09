@@ -9,15 +9,17 @@ from scripts.monitor_seed_runs import _metric_peaks, _write_final_summary
 class MonitorSeedRunsTest(unittest.TestCase):
     def test_metric_peaks_returns_best_value_and_step(self):
         records = [
-            {"step": 100, "train/phase1b/slot_match": 0.21, "train/ret": 0.1},
-            {"step": 200, "train/phase1b/slot_match": 0.34, "train/ret": 0.3},
-            {"step": 300, "train/phase1b/slot_match": 0.29, "train/ret": 0.2},
+            {"step": 100, "train/phase1b/slot_match": 0.21, "train/phase1b/slot_match_random": 0.25, "train/ret": 0.1},
+            {"step": 200, "train/phase1b/slot_match": 0.34, "train/phase1b/slot_match_random": 0.31, "train/ret": 0.3},
+            {"step": 300, "train/phase1b/slot_match": 0.29, "train/phase1b/slot_match_random": 0.36, "train/ret": 0.2},
         ]
 
         peaks = _metric_peaks(records)
 
         self.assertEqual(peaks["slot_match"]["step"], 200)
         self.assertAlmostEqual(peaks["slot_match"]["value"], 0.34)
+        self.assertEqual(peaks["slot_match_random"]["step"], 300)
+        self.assertAlmostEqual(peaks["slot_match_random"]["value"], 0.36)
         self.assertEqual(peaks["ret"]["step"], 200)
         self.assertAlmostEqual(peaks["ret"]["value"], 0.3)
 
@@ -41,6 +43,7 @@ class MonitorSeedRunsTest(unittest.TestCase):
                 "train/phase1b/slot_match": 0.28,
                 "train/phase1b/slot_match_random": 0.18,
                 "train/phase1b/slot_match_margin": 0.10,
+                "train/phase1b/slot_match_margin_score": 0.12,
                 "train/phase1b/slot_cycle": 0.82,
                 "train/phase1b/slot_identity": 0.34,
                 "train/phase1b/slot_concentration": 0.22,
@@ -82,6 +85,7 @@ class MonitorSeedRunsTest(unittest.TestCase):
                 "train/phase1b/slot_match": 0.31,
                 "train/phase1b/slot_match_random": 0.18,
                 "train/phase1b/slot_match_margin": 0.13,
+                "train/phase1b/slot_match_margin_score": 0.16,
                 "train/phase1b/slot_cycle": 0.85,
                 "train/phase1b/slot_identity": 0.37,
                 "train/phase1b/slot_concentration": 0.24,
@@ -121,6 +125,10 @@ class MonitorSeedRunsTest(unittest.TestCase):
 
         self.assertEqual(seed_summary["peaks"]["slot_match"]["step"], 200)
         self.assertAlmostEqual(seed_summary["peaks"]["slot_match"]["value"], 0.31)
+        self.assertEqual(seed_summary["peaks"]["slot_match_random"]["step"], 100)
+        self.assertAlmostEqual(seed_summary["peaks"]["slot_match_random"]["value"], 0.18)
+        self.assertEqual(seed_summary["peaks"]["slot_match_margin_score"]["step"], 200)
+        self.assertAlmostEqual(seed_summary["peaks"]["slot_match_margin_score"]["value"], 0.16)
         self.assertEqual(overall_summary["best_peaks"]["slot_match"]["seed"], "seed_0")
         self.assertEqual(overall_summary["best_peaks"]["slot_match"]["step"], 200)
         self.assertAlmostEqual(overall_summary["peak_value_avg"]["slot_match"], 0.31)

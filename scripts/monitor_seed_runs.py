@@ -13,7 +13,9 @@ from utils.phase_gates import evaluate_phase1b_gate, evaluate_phase2_gate, load_
 
 PEAK_METRICS = {
     "slot_match": "train/phase1b/slot_match",
+    "slot_match_random": "train/phase1b/slot_match_random",
     "slot_match_margin": "train/phase1b/slot_match_margin",
+    "slot_match_margin_score": "train/phase1b/slot_match_margin_score",
     "slot_cycle": "train/phase1b/slot_cycle",
     "slot_identity": "train/phase1b/slot_identity",
     "slot_concentration": "train/phase1b/slot_concentration",

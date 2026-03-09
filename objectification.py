@@ -196,6 +196,8 @@ class ObjectificationModule(nn.Module):
         flat_nxt = nxt.reshape(-1, self.obj_slots, nxt.shape[-1])
         if flat_current.shape[0] <= 1:
             return current.new_tensor(1.0 / float(max(1, self.obj_slots)))
+        # This is a same-distribution negative baseline, not a training gate: nearby samples can
+        # still align well because backgrounds and object prototypes are highly repetitive.
         shuffled_nxt = flat_nxt.roll(shifts=1, dims=0).reshape_as(nxt)
         shuffled_match = soft_slot_alignment(
             current,

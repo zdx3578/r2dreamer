@@ -743,6 +743,8 @@ class Dreamer(nn.Module):
             0.0,
             1.0,
         )
+        # Keep shuffled-match margin as a monitoring signal only: on Atari-style batches the
+        # random baseline stays high even in healthy runs, so using it as a hard gate shuts Phase2 off.
         match_gate = objectness_score.new_tensor(1.0)
         if self.phase2_warmup_updates <= 0:
             warmup_gate = objectness_score.new_tensor(1.0)
