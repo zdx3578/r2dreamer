@@ -387,7 +387,7 @@ def _main():
     parser.add_argument("metrics_path", type=Path)
     parser.add_argument(
         "--phase",
-        choices=["phase1a", "phase1b", "phase2", "atari_task", "atari_closed_loop"],
+        choices=["phase1a", "phase1b", "phase2", "phase2_executable", "atari_task", "atari_closed_loop"],
         default="phase1b",
     )
     parser.add_argument("--window", type=int, default=5)
@@ -401,6 +401,8 @@ def _main():
         result = evaluate_phase1a_gate(records, window=args.window)
     elif args.phase == "phase2":
         result = evaluate_phase2_gate(records, window=args.window, slot_count=args.slot_count)
+    elif args.phase == "phase2_executable":
+        result = evaluate_phase2_executable_gate(records, window=args.window, slot_count=args.slot_count)
     elif args.phase == "atari_task":
         result = evaluate_atari_task_gate(records, window=args.task_window, score_window=args.score_window)
     elif args.phase == "atari_closed_loop":
