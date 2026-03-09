@@ -25,14 +25,15 @@ class RuleMemory(nn.Module):
             "signature_proto", torch.zeros(self.num_operators, self.num_bindings, self.signature_dim), persistent=True
         )
         self.register_buffer("usage_count", torch.zeros(self.num_operators, self.num_bindings), persistent=True)
+        self.register_buffer("write_mass", torch.zeros(self.num_operators, self.num_bindings), persistent=True)
         self.register_buffer("ema_conf", torch.zeros(self.num_operators, self.num_bindings), persistent=True)
 
     def retrieve(self, q_u, q_b, q_sigma=None):
         joint = q_u.unsqueeze(-1) * q_b.unsqueeze(-2)
-        valid_cells = (self.usage_count > 0).to(joint.dtype)
+        valid_cells = (self.write_mass > 0).to(joint.dtype)
         joint_logit = torch.log(joint.clamp_min(1e-6))
 
-        usage_prior = torch.log1p(self.usage_count)
+        usage_prior = torch.log1p(self.write_mass)
         usage_prior = usage_prior / usage_prior.amax().clamp_min(1.0)
         conf_prior = self.ema_conf / self.ema_conf.amax().clamp_min(1e-6)
 
@@ -99,18 +100,21 @@ class RuleMemory(nn.Module):
                 bind_idx = idx % self.num_bindings
                 conf = write_conf[member]
                 conf_sum = conf.sum().clamp_min(1e-6)
+                prev_mass = self.write_mass[op_idx, bind_idx]
+                new_mass = prev_mass + conf_sum
+                blend = (conf_sum / new_mass.clamp_min(1e-6)).to(self.delta_rule_proto.dtype)
                 delta_mean = (selected_delta[member] * conf.unsqueeze(-1)).sum(dim=0) / conf_sum
                 sigma_mean = (selected_sigma[member] * conf.unsqueeze(-1)).sum(dim=0) / conf_sum
                 conf_mean = conf.mean()
-                self.delta_rule_proto[op_idx, bind_idx].mul_(self.ema_decay).add_(delta_mean * (1.0 - self.ema_decay))
-                self.signature_proto[op_idx, bind_idx].mul_(self.ema_decay).add_(sigma_mean * (1.0 - self.ema_decay))
+                self.delta_rule_proto[op_idx, bind_idx].lerp_(delta_mean, blend)
+                self.signature_proto[op_idx, bind_idx].lerp_(sigma_mean, blend)
                 self.ema_conf[op_idx, bind_idx].mul_(self.ema_decay).add_(conf_mean * (1.0 - self.ema_decay))
+                self.write_mass[op_idx, bind_idx].copy_(new_mass)
                 self.usage_count[op_idx, bind_idx].add_(float(member.sum()))
 
-        total_cells = float(self.num_operators * self.num_bindings)
-        occupied = (self.usage_count > 0).to(torch.float32)
+        occupied = (self.write_mass > 0).to(torch.float32)
         usage_fraction = occupied.mean()
-        usage_dist = self.usage_count.reshape(-1)
+        usage_dist = self.write_mass.reshape(-1)
         usage_dist = usage_dist / usage_dist.sum().clamp_min(1e-6)
         usage_entropy = -(usage_dist * torch.log(usage_dist + 1e-6)).sum()
         usage_entropy = usage_entropy / math.log(max(2, usage_dist.numel()))

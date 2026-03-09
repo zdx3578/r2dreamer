@@ -30,6 +30,25 @@ class Phase2RuleExecutionTest(unittest.TestCase):
         self.assertGreater(float(out["memory_conf"].item()), 0.0)
         self.assertAlmostEqual(float(stats["write_rate"]), 1.0)
 
+    def test_rule_memory_keeps_first_write_magnitude_with_smoothing_enabled(self):
+        memory = RuleMemory(
+            SimpleNamespace(memory_ema_decay=0.99, memory_retrieve_temperature=1.0),
+            num_operators=2,
+            num_bindings=2,
+            signature_dim=3,
+            rule_dim=3,
+        )
+        q_u = torch.tensor([[[1.0, 0.0]]])
+        q_b = torch.tensor([[[1.0, 0.0]]])
+        q_sigma = torch.tensor([[[0.2, 0.4, 0.6]]])
+        delta = torch.tensor([[[0.5, 1.5, 2.5]]])
+
+        memory.update(q_u, q_b, q_sigma, delta, torch.tensor([[[True]]]))
+        out = memory.retrieve(q_u, q_b, q_sigma)
+
+        torch.testing.assert_close(out["memory_delta_rule"], delta)
+        torch.testing.assert_close(out["memory_signature_proto"], q_sigma)
+
     def test_rule_memory_keeps_operator_binding_separated(self):
         memory = RuleMemory(
             SimpleNamespace(memory_ema_decay=0.0, memory_retrieve_temperature=1.0),
