@@ -106,7 +106,21 @@ def make_model_config(cnn_keys, mlp_keys, arc3_grid_keys="^$", use_objectificati
                 "rule_update": 0.1,
             },
             "r2dreamer": {"lambd": 5e-4},
-            "phase1a": {"goal_horizon": 3},
+            "phase1a": {
+                "goal_horizon": 3,
+                "reach_horizon": 4,
+                "event_ema_decay": 0.99,
+                "event_threshold_scale": 1.0,
+                "event_target_sharpness": 6.0,
+                "event_target_floor": 0.05,
+                "struct_recon_scale": 0.35,
+                "struct_smooth_scale": 0.5,
+                "struct_sparse_scale": 0.25,
+                "struct_event_scale": 0.25,
+                "goal_event_scale": 0.5,
+                "goal_struct_scale": 0.5,
+                "goal_risk_scale": 0.5,
+            },
             "phase2": {"m_obj_threshold": 0.1, "match_margin_threshold": 0.02},
             "rssm": {
                 "stoch": 4,
@@ -338,6 +352,8 @@ class Phase1ATest(unittest.TestCase):
         self.assertIn("loss/goal", metrics)
         self.assertIn("phase1a/map_std", metrics)
         self.assertIn("phase1a/slot_carry_confidence", metrics)
+        self.assertIn("phase1a/event_threshold", metrics)
+        self.assertIn("phase1a/event_score", metrics)
         self.assertIn("replay/priority_mean", metrics)
         if use_objectification:
             self.assertIn("loss/obj_stable", metrics)

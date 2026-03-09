@@ -31,6 +31,10 @@ def _mean(values):
     return sum(values) / len(values) if values else None
 
 
+def _last(values):
+    return values[-1] if values else None
+
+
 def _slope(values):
     if len(values) < 3:
         return None
@@ -237,13 +241,91 @@ def evaluate_phase2_gate(records, window=5, slot_count=8):
     }
 
 
+def evaluate_atari_task_gate(records, window=10, score_window=20):
+    required = ["train/ret"]
+    has_required = _finite_required(records, required)
+    train_ret = _recent_values(records, "train/ret", window)
+    opt_loss = _recent_values(records, "train/opt/loss", window)
+    scores = _recent_values(records, "episode/score", score_window)
+    lengths = _recent_values(records, "episode/length", score_window)
+
+    ret_mean = _mean(train_ret)
+    ret_slope = _slope(train_ret)
+    score_mean = _mean(scores)
+    score_max = max(scores) if scores else None
+
+    returns_nontrivial = bool(train_ret and ret_mean is not None and ret_mean > 0.1)
+    returns_stable = bool(opt_loss and max(opt_loss) < 1e6)
+    learning_progress = bool(
+        train_ret
+        and (
+            (ret_slope is not None and ret_slope > -0.02)
+            or (ret_mean is not None and ret_mean > 0.3)
+        )
+    )
+    score_nontrivial = bool(scores and score_max is not None and score_max > 0.0)
+    episode_coverage = bool(scores and lengths)
+
+    checks = {
+        "has_required_metrics": has_required,
+        "returns_nontrivial": returns_nontrivial,
+        "returns_stable": returns_stable,
+        "learning_progress": learning_progress,
+        "score_nontrivial": score_nontrivial,
+        "episode_coverage": episode_coverage,
+    }
+    return {
+        "phase": "atari_task",
+        "ready": all(checks.values()),
+        "checks": checks,
+        "summary": {
+            "ret_mean": ret_mean,
+            "ret_last": _last(train_ret),
+            "ret_slope": ret_slope,
+            "score_mean": score_mean,
+            "score_last": _last(scores),
+            "score_max": score_max,
+            "score_count": len(scores),
+            "episode_length_mean": _mean(lengths),
+        },
+    }
+
+
+def evaluate_atari_closed_loop(records, window=5, task_window=10, score_window=20, slot_count=8):
+    phase2 = evaluate_phase2_gate(records, window=window, slot_count=slot_count)
+    task = evaluate_atari_task_gate(records, window=task_window, score_window=score_window)
+    checks = {
+        "phase2_ready": phase2["ready"],
+        "task_ready": task["ready"],
+    }
+    return {
+        "phase": "atari_closed_loop",
+        "ready": all(checks.values()),
+        "checks": checks,
+        "summary": {
+            "phase2_gate_scale_mean": phase2["summary"]["gate_scale_mean"],
+            "ret_mean": task["summary"]["ret_mean"],
+            "score_mean": task["summary"]["score_mean"],
+            "score_max": task["summary"]["score_max"],
+        },
+        "phase2": phase2,
+        "task": task,
+    }
+
+
 def _main():
     import argparse
 
-    parser = argparse.ArgumentParser(description="Evaluate Phase 1A/1B gate metrics from metrics.jsonl.")
+    parser = argparse.ArgumentParser(description="Evaluate structured and task gates from metrics.jsonl.")
     parser.add_argument("metrics_path", type=Path)
-    parser.add_argument("--phase", choices=["phase1a", "phase1b", "phase2"], default="phase1b")
+    parser.add_argument(
+        "--phase",
+        choices=["phase1a", "phase1b", "phase2", "atari_task", "atari_closed_loop"],
+        default="phase1b",
+    )
     parser.add_argument("--window", type=int, default=5)
+    parser.add_argument("--task-window", type=int, default=10)
+    parser.add_argument("--score-window", type=int, default=20)
     parser.add_argument("--slot-count", type=int, default=8)
     args = parser.parse_args()
 
@@ -252,6 +334,16 @@ def _main():
         result = evaluate_phase1a_gate(records, window=args.window)
     elif args.phase == "phase2":
         result = evaluate_phase2_gate(records, window=args.window, slot_count=args.slot_count)
+    elif args.phase == "atari_task":
+        result = evaluate_atari_task_gate(records, window=args.task_window, score_window=args.score_window)
+    elif args.phase == "atari_closed_loop":
+        result = evaluate_atari_closed_loop(
+            records,
+            window=args.window,
+            task_window=args.task_window,
+            score_window=args.score_window,
+            slot_count=args.slot_count,
+        )
     else:
         result = evaluate_phase1b_gate(records, window=args.window, slot_count=args.slot_count)
     print(json.dumps(result, indent=2, ensure_ascii=False))

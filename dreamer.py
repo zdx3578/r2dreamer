@@ -80,7 +80,20 @@ class Dreamer(nn.Module):
         self.use_binding_head = bool(getattr(config, "use_binding_head", False))
         self.use_signature_head = bool(getattr(config, "use_signature_head", False))
         self.use_rule_update = bool(getattr(config, "use_rule_update", False))
-        self.goal_horizon = int(getattr(getattr(config, "phase1a", {}), "goal_horizon", 3))
+        phase1a_cfg = getattr(config, "phase1a", {})
+        self.goal_horizon = int(getattr(phase1a_cfg, "goal_horizon", 3))
+        self.reach_horizon = int(getattr(phase1a_cfg, "reach_horizon", self.goal_horizon))
+        self.phase1a_event_ema_decay = float(getattr(phase1a_cfg, "event_ema_decay", 0.99))
+        self.phase1a_event_threshold_scale = float(getattr(phase1a_cfg, "event_threshold_scale", 1.0))
+        self.phase1a_event_target_sharpness = float(getattr(phase1a_cfg, "event_target_sharpness", 6.0))
+        self.phase1a_event_target_floor = float(getattr(phase1a_cfg, "event_target_floor", 0.05))
+        self.phase1a_struct_recon_scale = float(getattr(phase1a_cfg, "struct_recon_scale", 0.35))
+        self.phase1a_struct_smooth_scale = float(getattr(phase1a_cfg, "struct_smooth_scale", 0.5))
+        self.phase1a_struct_sparse_scale = float(getattr(phase1a_cfg, "struct_sparse_scale", 0.25))
+        self.phase1a_struct_event_scale = float(getattr(phase1a_cfg, "struct_event_scale", 0.25))
+        self.phase1a_goal_event_scale = float(getattr(phase1a_cfg, "goal_event_scale", 0.5))
+        self.phase1a_goal_struct_scale = float(getattr(phase1a_cfg, "goal_struct_scale", 0.5))
+        self.phase1a_goal_risk_scale = float(getattr(phase1a_cfg, "goal_risk_scale", 0.5))
         self.phase2_m_obj_threshold = float(getattr(getattr(config, "phase2", {}), "m_obj_threshold", 0.2))
         self.phase2_match_margin_threshold = float(getattr(getattr(config, "phase2", {}), "match_margin_threshold", 0.02))
         self.phase2_warmup_updates = int(getattr(getattr(config, "phase2", {}), "warmup_updates", 0))
@@ -92,6 +105,9 @@ class Dreamer(nn.Module):
             "obj_rel": float(getattr(objectification_cfg, "obj_rel_early", self._loss_scales.get("obj_rel", 1.0))),
         }
         self._model_updates = 0
+        self.register_buffer("_event_delta_mean_ema", torch.zeros(()))
+        self.register_buffer("_event_delta_sq_ema", torch.zeros(()))
+        self.register_buffer("_event_stats_initialized", torch.zeros((), dtype=torch.bool))
 
         if self.use_effect_model and not self.use_structured_readout:
             raise ValueError("Effect model requires use_structured_readout=True.")
@@ -578,10 +594,11 @@ class Dreamer(nn.Module):
                 + (target_delta_O.abs() * structured["transition_obj_mask"]).mean(dim=(-2, -1))
                 + (structured["target_delta_g"].abs() * structured["transition_valid_ratio"]).mean(dim=-1)
             ).unsqueeze(-1)
-            threshold = delta_struct.mean().detach() + 0.5 * delta_struct.std(unbiased=False).detach()
-            explicit_event = reward_target.abs() > 1e-6
-            structural_event = delta_struct > threshold
-            event_target = (explicit_event | terminal_target | structural_event).to(effect_out["event_logits"].dtype)
+            event_target, event_threshold, structural_score = self._stabilized_event_target(
+                delta_struct,
+                reward_target,
+                terminal_target,
+            )
             structured.update(
                 {
                     "z_eff": z_eff,
@@ -590,6 +607,8 @@ class Dreamer(nn.Module):
                     "target_delta_O": target_delta_O,
                     "delta_struct": delta_struct.detach(),
                     "event_target": event_target,
+                    "event_threshold": event_threshold,
+                    "event_structural_score": structural_score,
                     "reward_target": reward_target,
                     "terminal_target": terminal_target,
                 }
@@ -613,6 +632,54 @@ class Dreamer(nn.Module):
         denom = weight.sum().clamp_min(1e-6)
         return numer / denom
 
+    def _weighted_mean(self, value, weight=None):
+        if weight is None:
+            return value.mean()
+        weight = weight.to(value.dtype)
+        while weight.dim() < value.dim():
+            weight = weight.unsqueeze(-1)
+        weight = torch.broadcast_to(weight, value.shape)
+        numer = (value * weight).sum()
+        denom = weight.sum().clamp_min(1e-6)
+        return numer / denom
+
+    def _slot_change_concentration(self, delta, mask):
+        slot_mass = delta.abs().mean(dim=-1)
+        if mask is not None:
+            slot_mass = slot_mass * mask.squeeze(-1).to(slot_mass.dtype)
+        slot_prob = slot_mass / slot_mass.sum(dim=-1, keepdim=True).clamp_min(1e-6)
+        return slot_prob.max(dim=-1, keepdim=True).values
+
+    @torch.no_grad()
+    def _update_event_stats(self, delta_struct):
+        sample = delta_struct.detach().to(torch.float32)
+        mean = sample.mean()
+        sq = sample.square().mean()
+        if not bool(self._event_stats_initialized.item()):
+            self._event_delta_mean_ema.copy_(mean)
+            self._event_delta_sq_ema.copy_(sq)
+            self._event_stats_initialized.fill_(True)
+        else:
+            decay = self.phase1a_event_ema_decay
+            self._event_delta_mean_ema.mul_(decay).add_(mean * (1.0 - decay))
+            self._event_delta_sq_ema.mul_(decay).add_(sq * (1.0 - decay))
+
+    def _stabilized_event_target(self, delta_struct, reward_target, terminal_target):
+        self._update_event_stats(delta_struct)
+        event_mean = self._event_delta_mean_ema.to(delta_struct.dtype)
+        event_var = (self._event_delta_sq_ema - self._event_delta_mean_ema.square()).clamp_min(1e-6)
+        event_std = torch.sqrt(event_var).to(delta_struct.dtype)
+        threshold = torch.clamp(
+            event_mean + self.phase1a_event_threshold_scale * event_std,
+            min=self.phase1a_event_target_floor,
+        )
+        normalized_delta = (delta_struct - threshold) / event_std.clamp_min(1e-4)
+        structural_score = torch.sigmoid(self.phase1a_event_target_sharpness * normalized_delta)
+        reward_score = torch.tanh(reward_target.abs())
+        terminal_score = terminal_target.to(delta_struct.dtype)
+        event_target = torch.maximum(torch.maximum(structural_score, reward_score), terminal_score)
+        return event_target.detach(), threshold.detach(), structural_score.detach()
+
     def _phase1a_losses(self, structured, data):
         losses = {}
         metrics = {}
@@ -620,11 +687,9 @@ class Dreamer(nn.Module):
         readouts = structured["readouts"]
         current = structured["current"]
         feat_target = feat_seq.detach()
-        losses["struct_map"] = self._weighted_loss(readouts["M_recon"], feat_target, readouts["valid_ratio"], kind="mse")
-        losses["struct_obj"] = self._weighted_loss(readouts["O_recon"], feat_target, readouts["valid_ratio"], kind="mse")
-        losses["struct_global"] = self._weighted_loss(
-            readouts["g_rho_recon"], feat_target, readouts["valid_ratio"], kind="mse"
-        )
+        map_recon = self._weighted_loss(readouts["M_recon"], feat_target, readouts["valid_ratio"], kind="mse")
+        obj_recon = self._weighted_loss(readouts["O_recon"], feat_target, readouts["valid_ratio"], kind="mse")
+        global_recon = self._weighted_loss(readouts["g_rho_recon"], feat_target, readouts["valid_ratio"], kind="mse")
 
         metrics["phase1a/map_std"] = readouts["M_t"].std()
         metrics["phase1a/obj_std"] = readouts["O_t"].std()
@@ -650,33 +715,148 @@ class Dreamer(nn.Module):
             event_target = structured["event_target"]
             losses["event"] = F.binary_cross_entropy_with_logits(effect_out["event_logits"], event_target)
 
+            non_event = (1.0 - event_target).detach()
+            event_weight = event_target.detach()
+            map_non_event_weight = structured["transition_map_mask"] * non_event.unsqueeze(-2)
+            obj_non_event_weight = structured["transition_obj_mask"] * non_event.unsqueeze(-2)
+            valid_non_event_weight = structured["transition_valid_ratio"] * non_event
+
+            map_smooth = self._weighted_loss(current["M_t"], structured["nxt"]["M_t"], map_non_event_weight, kind="smooth_l1")
+            obj_smooth = self._weighted_loss(current["O_t"], structured["nxt"]["O_t"], obj_non_event_weight, kind="smooth_l1")
+            global_smooth = self._weighted_loss(current["g_t"], structured["nxt"]["g_t"], valid_non_event_weight, kind="smooth_l1")
+            rule_smooth = self._weighted_loss(current["rho_t"], structured["nxt"]["rho_t"], valid_non_event_weight, kind="smooth_l1")
+            map_concentration = self._slot_change_concentration(target_delta_M, structured["transition_map_mask"])
+            obj_concentration = self._slot_change_concentration(target_delta_O, structured["transition_obj_mask"])
+            event_mass = event_weight.sum()
+            zero = event_mass.new_zeros(())
+            map_sparse = torch.where(
+                event_mass > 1e-6,
+                1.0 - self._weighted_mean(map_concentration, event_weight),
+                zero,
+            )
+            obj_sparse = torch.where(
+                event_mass > 1e-6,
+                1.0 - self._weighted_mean(obj_concentration, event_weight),
+                zero,
+            )
+            global_change_signal = torch.tanh(
+                target_delta_g.abs().mean(dim=-1, keepdim=True)
+                + structured["target_delta_rho"].abs().mean(dim=-1, keepdim=True)
+            )
+            global_event_align = F.smooth_l1_loss(global_change_signal, event_target)
+
+            losses["struct_map"] = (
+                self.phase1a_struct_recon_scale * map_recon
+                + self.phase1a_struct_smooth_scale * map_smooth
+                + self.phase1a_struct_sparse_scale * map_sparse
+            )
+            losses["struct_obj"] = (
+                self.phase1a_struct_recon_scale * obj_recon
+                + self.phase1a_struct_smooth_scale * obj_smooth
+                + self.phase1a_struct_sparse_scale * obj_sparse
+            )
+            losses["struct_global"] = (
+                self.phase1a_struct_recon_scale * global_recon
+                + self.phase1a_struct_smooth_scale * 0.5 * (global_smooth + rule_smooth)
+                + self.phase1a_struct_event_scale * global_event_align
+            )
+
             metrics["phase1a/delta_map_abs"] = (target_delta_M.abs() * structured["transition_map_mask"]).mean()
             metrics["phase1a/delta_obj_abs"] = (target_delta_O.abs() * structured["transition_obj_mask"]).mean()
             metrics["phase1a/delta_global_abs"] = (target_delta_g.abs() * structured["transition_valid_ratio"]).mean()
             metrics["phase1a/event_rate"] = event_target.mean()
+            metrics["phase1a/event_threshold"] = structured["event_threshold"]
+            metrics["phase1a/event_score"] = structured["event_structural_score"].mean()
+            metrics["phase1a/map_smooth"] = map_smooth
+            metrics["phase1a/obj_smooth"] = obj_smooth
+            metrics["phase1a/global_smooth"] = 0.5 * (global_smooth + rule_smooth)
+            metrics["phase1a/map_change_concentration"] = map_concentration.mean()
+            metrics["phase1a/obj_change_concentration"] = obj_concentration.mean()
+        else:
+            losses["struct_map"] = map_recon
+            losses["struct_obj"] = obj_recon
+            losses["struct_global"] = global_recon
 
-        feat_delta = (feat_seq[:, 1:] - feat_seq[:, :-1]).detach()
+        reward_target = self._seq_scalar(data["reward"])
+        terminal_target = self._seq_scalar(data["is_terminal"])
+        delta_struct = structured.get("delta_struct")
+        event_target = structured.get("event_target")
+        structural_score = structured.get("event_structural_score")
         if self.use_reachability_head:
             reach_pred = self.reachability_head(feat_seq[:, :-1], current["M_t"])
-            reach_target = torch.tanh(feat_delta.abs().mean(dim=-1, keepdim=True))
+            if delta_struct is None or event_target is None:
+                reach_signal = torch.tanh((feat_seq[:, 1:] - feat_seq[:, :-1]).detach().abs().mean(dim=-1, keepdim=True))
+            else:
+                base_struct = structural_score.detach() if structural_score is not None else torch.tanh(delta_struct.detach())
+                reach_signal = torch.clamp(
+                    0.6 * base_struct + 0.3 * event_target.detach() + 0.1 * torch.tanh(reward_target.abs()),
+                    0.0,
+                    1.0,
+                )
+            reach_target = torch.clamp(
+                torch.tanh(
+                    self._short_horizon_return(
+                        reach_signal,
+                        terminal_target,
+                        1 - 1 / self.horizon,
+                        self.reach_horizon,
+                    )
+                ),
+                0.0,
+                1.0,
+            ).detach()
             losses["reach"] = F.smooth_l1_loss(reach_pred, reach_target)
             metrics["phase1a/reach_target"] = reach_target.mean()
 
         if self.use_goal_progress_head:
             goal_pred = self.goal_progress_head(feat_seq[:, :-1], current["g_t"])
-            goal_target = self._short_horizon_return(
-                self._seq_scalar(data["reward"]),
-                self._seq_scalar(data["is_terminal"]),
+            reward_progress = self._short_horizon_return(
+                reward_target,
+                terminal_target,
+                1 - 1 / self.horizon,
+                self.goal_horizon,
+            )
+            if delta_struct is None or event_target is None:
+                struct_progress = reward_progress.new_zeros(reward_progress.shape)
+                event_progress = reward_progress.new_zeros(reward_progress.shape)
+            else:
+                base_struct = structural_score.detach() if structural_score is not None else torch.tanh(delta_struct.detach())
+                struct_progress = self._short_horizon_return(
+                    base_struct,
+                    terminal_target,
+                    1 - 1 / self.horizon,
+                    self.goal_horizon,
+                )
+                event_progress = self._short_horizon_return(
+                    event_target.detach(),
+                    terminal_target,
+                    1 - 1 / self.horizon,
+                    self.goal_horizon,
+                )
+            terminal_risk = self._short_horizon_return(
+                terminal_target,
+                terminal_target,
                 1 - 1 / self.horizon,
                 self.goal_horizon,
             )
             goal_target = torch.clamp(
-                torch.tanh(goal_target) + 0.25 * torch.tanh(target_delta_g.abs().mean(dim=-1, keepdim=True)),
+                torch.tanh(
+                    reward_progress
+                    + self.phase1a_goal_event_scale * event_progress
+                    + self.phase1a_goal_struct_scale * struct_progress
+                    + 0.25
+                    * torch.tanh(
+                        target_delta_g.abs().mean(dim=-1, keepdim=True)
+                        + structured["target_delta_rho"].abs().mean(dim=-1, keepdim=True)
+                    )
+                )
+                - self.phase1a_goal_risk_scale * terminal_risk,
                 -1.0,
                 1.0,
             ).detach()
             losses["goal"] = F.smooth_l1_loss(goal_pred, goal_target)
             metrics["phase1a/goal_target"] = goal_target.mean()
+            metrics["phase1a/goal_risk_target"] = terminal_risk.mean()
 
         return losses, metrics
 
