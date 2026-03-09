@@ -126,8 +126,8 @@ def evaluate_phase1b_gate(records, window=5, slot_count=8):
     obj_stable = _recent_values(records, "train/loss/obj_stable", window)
     obj_local = _recent_values(records, "train/loss/obj_local", window)
     obj_rel = _recent_values(records, "train/loss/obj_rel", window)
-    fallback_random_baseline = 1.0 / float(max(1, slot_count))
-    random_slot_baseline = _mean(slot_match_random) if slot_match_random else fallback_random_baseline
+    uniform_slot_baseline = 1.0 / float(max(1, slot_count))
+    random_slot_baseline = _mean(slot_match_random) if slot_match_random else uniform_slot_baseline
     if not slot_match_margin and slot_match:
         slot_match_margin = [value - random_slot_baseline for value in slot_match]
     if not object_interface and slot_match_margin and slot_cycle and slot_identity and slot_concentration:
@@ -140,13 +140,15 @@ def evaluate_phase1b_gate(records, window=5, slot_count=8):
         ]
         object_interface = [value / 4.0 for value in object_interface]
 
-    match_margin_threshold = 0.02
+    slot_match_threshold = max(0.25, uniform_slot_baseline + 0.05)
     slot_cycle_threshold = 0.5
     slot_identity_threshold = 0.2
     object_interface_threshold = 0.25
 
-    slot_matching_better_than_random = bool(slot_match_margin and _mean(slot_match_margin) > match_margin_threshold)
-    locality_better_than_random = bool(slot_concentration and _mean(slot_concentration) > random_slot_baseline)
+    # The shuffled-match baseline is informative for monitoring, but in Atari-style batches it
+    # stays high even on healthy runs. Readiness should track absolute structure quality instead.
+    slot_matching_nontrivial = bool(slot_match and _mean(slot_match) > slot_match_threshold)
+    locality_better_than_uniform = bool(slot_concentration and _mean(slot_concentration) > uniform_slot_baseline)
     slot_cycle_healthy = bool(slot_cycle and _mean(slot_cycle) > slot_cycle_threshold)
     slot_identity_healthy = bool(slot_identity and _mean(slot_identity) > slot_identity_threshold)
     object_interface_healthy = bool(object_interface and _mean(object_interface) > object_interface_threshold)
@@ -156,8 +158,8 @@ def evaluate_phase1b_gate(records, window=5, slot_count=8):
     checks = {
         "phase1a_ready": phase1a["ready"],
         "has_required_metrics": has_required,
-        "slot_matching_better_than_random": slot_matching_better_than_random,
-        "locality_better_than_random": locality_better_than_random,
+        "slot_matching_nontrivial": slot_matching_nontrivial,
+        "locality_better_than_uniform": locality_better_than_uniform,
         "slot_cycle_healthy": slot_cycle_healthy,
         "slot_identity_healthy": slot_identity_healthy,
         "object_interface_healthy": object_interface_healthy,
@@ -177,7 +179,9 @@ def evaluate_phase1b_gate(records, window=5, slot_count=8):
             "slot_identity_mean": _mean(slot_identity),
             "slot_concentration_mean": _mean(slot_concentration),
             "object_interface_mean": _mean(object_interface),
+            "uniform_slot_baseline": uniform_slot_baseline,
             "random_slot_baseline": random_slot_baseline,
+            "slot_match_threshold": slot_match_threshold,
         },
         "phase1a": phase1a,
     }

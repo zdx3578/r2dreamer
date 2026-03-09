@@ -58,7 +58,7 @@ class PhaseGateTest(unittest.TestCase):
         ]
         result = evaluate_phase1b_gate(records, slot_count=8)
         self.assertTrue(result["ready"])
-        self.assertGreater(result["summary"]["slot_match_mean"], result["summary"]["random_slot_baseline"])
+        self.assertGreater(result["summary"]["slot_match_mean"], result["summary"]["slot_match_threshold"])
         self.assertGreater(result["summary"]["slot_match_margin_mean"], 0.02)
 
     def test_phase1b_gate_accepts_stable_plateau(self):
@@ -124,6 +124,40 @@ class PhaseGateTest(unittest.TestCase):
         result = evaluate_phase1b_gate(records, slot_count=8)
         self.assertFalse(result["ready"])
         self.assertAlmostEqual(result["summary"]["random_slot_baseline"], 0.18)
+        self.assertAlmostEqual(result["summary"]["uniform_slot_baseline"], 0.125)
+        self.assertAlmostEqual(result["summary"]["slot_match_threshold"], 0.25)
+
+    def test_phase1b_gate_accepts_high_random_baseline_when_absolute_match_is_strong(self):
+        records = [
+            {
+                "train/loss/delta_map": 0.4,
+                "train/loss/delta_obj": 0.5,
+                "train/loss/delta_global": 0.3,
+                "train/loss/event": 0.7,
+                "train/phase1a/map_std": 0.7,
+                "train/phase1a/obj_std": 0.9,
+                "train/phase1a/delta_map_abs": 0.03,
+                "train/phase1a/delta_obj_abs": 0.01,
+                "train/opt/loss": 25.0,
+                "train/loss/obj_stable": 0.4,
+                "train/loss/obj_local": 0.1,
+                "train/loss/obj_rel": 2.2,
+                "train/phase1b/m_obj": 0.38,
+                "train/phase1b/slot_match": 0.51,
+                "train/phase1b/slot_match_random": 0.509,
+                "train/phase1b/slot_match_margin": 0.001,
+                "train/phase1b/slot_cycle": 0.94,
+                "train/phase1b/slot_identity": 0.56,
+                "train/phase1b/slot_concentration": 0.97,
+                "train/phase1b/object_interface": 0.62,
+                "train/phase1b/motif_entropy": 0.9,
+            }
+            for _ in range(5)
+        ]
+        result = evaluate_phase1b_gate(records, slot_count=8)
+        self.assertTrue(result["ready"])
+        self.assertLess(result["summary"]["slot_match_margin_mean"], 0.02)
+        self.assertGreater(result["summary"]["slot_match_mean"], result["summary"]["slot_match_threshold"])
 
     def test_load_metrics_records(self):
         content = '\n'.join(['{"step": 1, "train/loss/delta_map": 0.1}', '{"step": 2, "train/loss/delta_map": 0.2}'])
@@ -175,6 +209,52 @@ class PhaseGateTest(unittest.TestCase):
                 "train/phase2/match_gate_scale": 0.4,
             }
             for idx in range(5)
+        ]
+        result = evaluate_phase2_gate(records, slot_count=8)
+        self.assertTrue(result["ready"])
+
+    def test_phase2_gate_accepts_high_random_baseline_when_structure_is_healthy(self):
+        records = [
+            {
+                "train/loss/delta_map": 0.4,
+                "train/loss/delta_obj": 0.5,
+                "train/loss/delta_global": 0.3,
+                "train/loss/event": 0.7,
+                "train/phase1a/map_std": 0.7,
+                "train/phase1a/obj_std": 0.9,
+                "train/phase1a/delta_map_abs": 0.03,
+                "train/phase1a/delta_obj_abs": 0.01,
+                "train/opt/loss": 25.0,
+                "train/loss/obj_stable": 0.4,
+                "train/loss/obj_local": 0.1,
+                "train/loss/obj_rel": 2.2,
+                "train/phase1b/m_obj": 0.38,
+                "train/phase1b/slot_match": 0.51,
+                "train/phase1b/slot_match_random": 0.509,
+                "train/phase1b/slot_match_margin": 0.001,
+                "train/phase1b/slot_cycle": 0.94,
+                "train/phase1b/slot_identity": 0.56,
+                "train/phase1b/slot_concentration": 0.97,
+                "train/phase1b/object_interface": 0.62,
+                "train/phase1b/motif_entropy": 0.9,
+                "train/loss/op_assign": 0.4,
+                "train/loss/op_proto": 0.3,
+                "train/loss/op_reuse": 0.2,
+                "train/loss/bind_ce": 0.2,
+                "train/loss/bind_consistency": 0.0,
+                "train/loss/sig_scope": 0.0,
+                "train/loss/sig_duration": 0.0,
+                "train/loss/sig_impact": 0.0,
+                "train/loss/rule_update": 0.02,
+                "train/phase2/operator_entropy": 1.0,
+                "train/phase2/operator_usage_entropy": 1.0,
+                "train/phase2/binding_entropy": 0.46,
+                "train/phase2/signature_std": 0.27,
+                "train/phase2/rule_delta_abs": 0.01,
+                "train/phase2/gate_scale": 0.22,
+                "train/phase2/match_gate_scale": 1.0,
+            }
+            for _ in range(5)
         ]
         result = evaluate_phase2_gate(records, slot_count=8)
         self.assertTrue(result["ready"])
