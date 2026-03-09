@@ -219,7 +219,7 @@ class Dreamer(nn.Module):
             betas=(config.beta1, config.beta2),
             eps=config.eps,
         )
-        self._scaler = GradScaler()
+        self._scaler = GradScaler(device=self.device.type, enabled=self.device.type == "cuda")
 
         def lr_lambda(step):
             if config.warmup:
@@ -231,8 +231,11 @@ class Dreamer(nn.Module):
         self.train()
         self.clone_and_freeze()
         if config.compile:
-            print("Compiling update function with torch.compile...")
-            self._cal_grad = torch.compile(self._cal_grad, mode="reduce-overhead")
+            if self.device.type == "cuda":
+                print("Compiling update function with torch.compile...")
+                self._cal_grad = torch.compile(self._cal_grad, mode="reduce-overhead")
+            else:
+                print("Skipping torch.compile because current device is not CUDA.")
 
     def _update_slow_target(self):
         """Update slow-moving value target network."""
@@ -405,7 +408,7 @@ class Dreamer(nn.Module):
         self._scaler.update()  # adjust scale
         self._scheduler.step()  # increment scheduler
         self._optimizer.zero_grad(set_to_none=True)  # reset grads
-        mets["opt/lr"] = self._scheduler.get_lr()[0]
+        mets["opt/lr"] = self._scheduler.get_last_lr()[0]
         mets["opt/grad_scale"] = self._scaler.get_scale()
         if self._log_grads:
             updates = [(new - old) for (new, old) in zip(self._named_params.values(), old_params)]

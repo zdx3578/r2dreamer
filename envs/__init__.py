@@ -60,6 +60,24 @@ def make_env(config, id):
             config.camera,
             config.seed + id,
         )
+    elif suite == "arc3":
+        import envs.arc3 as arc3
+
+        env = arc3.Arc3Grid(
+            task,
+            size=tuple(config.size),
+            grid_encoding=config.grid_encoding,
+            num_colors=config.num_colors,
+            reward_per_level=config.reward_per_level,
+            reward_win=config.reward_win,
+            reward_loss=config.reward_loss,
+            operation_mode=config.operation_mode,
+            environments_dir=config.environments_dir,
+            recordings_dir=config.recordings_dir,
+            arc_api_key=config.arc_api_key,
+            arc_base_url=config.arc_base_url,
+            seed=config.seed + id,
+        )
     else:
         raise NotImplementedError(suite)
     env = wrappers.TimeLimit(env, config.time_limit // config.action_repeat)

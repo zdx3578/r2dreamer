@@ -1,0 +1,6 @@
+env: arc3_grid
+model:
+  use_structured_readout: True
+  use_effect_model: True
+  use_goal_progress_head: True
+  use_reachability_head: True

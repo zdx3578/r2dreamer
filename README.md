@@ -4,7 +4,7 @@ This repository provides a PyTorch implementation of [R2-Dreamer][r2dreamer] (IC
 
 ## Instructions
 
-Install dependencies. This repository is tested with Ubuntu 24.04 and Python 3.11.
+Install dependencies. This repository now requires Python 3.12 or newer, and ARC3 integration is built against that baseline.
 
 If you prefer Docker, follow [`docs/docker.md`](docs/docker.md).
 
@@ -17,6 +17,12 @@ Run training on default settings:
 
 ```bash
 python3 train.py logdir=./logdir/test
+```
+
+Run the structured Phase 1A baseline on ARC3:
+
+```bash
+python3 train.py env=arc3_grid +exp=phase1a_arc3 logdir=./logdir/arc3_test
 ```
 
 Monitoring results:

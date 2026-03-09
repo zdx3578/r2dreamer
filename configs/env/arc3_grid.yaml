@@ -1,0 +1,30 @@
+task: arc3_ls20
+steps: 2.0e5
+env_num: 4
+eval_episode_num: 4
+action_repeat: 1
+train_ratio: 64
+time_limit: 128
+
+seed: ${seed}
+device: ${device}
+
+size: [64, 64]
+encoder:
+  mlp_keys: 'state_flags|progress|action_mask'
+  cnn_keys: 'grid'
+decoder:
+  mlp_keys: 'state_flags|progress|action_mask'
+  cnn_keys: 'grid'
+
+grid_encoding: onehot
+num_colors: 16
+reward_per_level: 1.0
+reward_win: 10.0
+reward_loss: 0.0
+
+operation_mode: offline
+environments_dir: environment_files
+recordings_dir: recordings
+arc_api_key: ''
+arc_base_url: 'https://three.arcprize.org'

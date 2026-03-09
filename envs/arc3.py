@@ -1,0 +1,307 @@
+from __future__ import annotations
+
+from dataclasses import dataclass
+from typing import Any
+
+import gymnasium as gym
+import numpy as np
+
+
+def _to_nested_list(value: Any) -> Any:
+    if hasattr(value, "tolist"):
+        return value.tolist()
+    return value
+
+
+def normalize_arc_frame(frame_any: Any, size: tuple[int, int]) -> np.ndarray:
+    frame = _to_nested_list(frame_any)
+    for _ in range(3):
+        if not isinstance(frame, list) or not frame:
+            break
+        first = _to_nested_list(frame[0])
+        if isinstance(first, list) and first and isinstance(_to_nested_list(first[0]), list):
+            frame = first
+            continue
+        break
+
+    height, width = map(int, size)
+    grid = np.zeros((height, width), dtype=np.int32)
+    if not isinstance(frame, list):
+        return grid
+    for y, row in enumerate(frame[:height]):
+        row = _to_nested_list(row)
+        if not isinstance(row, list):
+            continue
+        for x, value in enumerate(row[:width]):
+            try:
+                grid[y, x] = int(value)
+            except Exception:
+                grid[y, x] = 0
+    return grid
+
+
+def encode_arc_grid(grid: np.ndarray, num_colors: int, encoding: str) -> np.ndarray:
+    grid = np.asarray(grid, dtype=np.int32)
+    grid = np.clip(grid, 0, int(num_colors) - 1)
+    if encoding == "onehot":
+        return np.eye(int(num_colors), dtype=np.float32)[grid]
+    if encoding == "scalar":
+        denom = max(1, int(num_colors) - 1)
+        return (grid.astype(np.float32) / float(denom))[..., None]
+    raise ValueError(f"Unsupported ARC3 grid encoding: {encoding}")
+
+
+def encode_state_flags(state_name: str) -> np.ndarray:
+    state = str(state_name).upper()
+    return np.array(
+        [
+            state == "NOT_PLAYED",
+            state not in {"NOT_PLAYED", "WIN", "GAME_OVER"},
+            state == "WIN",
+            state == "GAME_OVER",
+        ],
+        dtype=np.float32,
+    )
+
+
+def encode_action_mask(available_actions: list[int], action_count: int) -> np.ndarray:
+    mask = np.zeros(int(action_count), dtype=np.float32)
+    for value in available_actions:
+        if 0 <= int(value) < int(action_count):
+            mask[int(value)] = 1.0
+    return mask
+
+
+def decode_arc_action(action: np.ndarray, action_count: int, width: int, height: int) -> tuple[int, int, int]:
+    action = np.asarray(action, dtype=np.float32).reshape(-1)
+    split0 = int(action_count)
+    split1 = split0 + int(width)
+    expected = split1 + int(height)
+    if action.size != expected:
+        raise ValueError(f"ARC3 action size mismatch: expected {expected}, got {action.size}.")
+    action_id = int(np.argmax(action[:split0]))
+    x = int(np.argmax(action[split0:split1]))
+    y = int(np.argmax(action[split1:]))
+    return action_id, x, y
+
+
+def derive_arc_reward(
+    prev_levels_completed: int,
+    prev_state_name: str,
+    next_levels_completed: int,
+    next_state_name: str,
+    *,
+    reward_per_level: float,
+    reward_win: float,
+    reward_loss: float,
+) -> float:
+    reward = float(next_levels_completed - prev_levels_completed) * float(reward_per_level)
+    prev_state = str(prev_state_name).upper()
+    next_state = str(next_state_name).upper()
+    if next_state == "WIN" and prev_state != "WIN":
+        reward += float(reward_win)
+    if next_state == "GAME_OVER" and prev_state != "GAME_OVER":
+        reward += float(reward_loss)
+    return reward
+
+
+@dataclass
+class Arc3Transition:
+    grid: np.ndarray
+    state_name: str
+    levels_completed: int
+    win_levels: int
+    available_actions: list[int]
+    raw: Any
+
+
+class Arc3Grid(gym.Env):
+    metadata = {}
+
+    def __init__(
+        self,
+        game_id: str,
+        size: tuple[int, int] = (64, 64),
+        grid_encoding: str = "onehot",
+        num_colors: int = 16,
+        reward_per_level: float = 1.0,
+        reward_win: float = 10.0,
+        reward_loss: float = 0.0,
+        operation_mode: str = "offline",
+        environments_dir: str = "environment_files",
+        recordings_dir: str = "recordings",
+        arc_api_key: str = "",
+        arc_base_url: str = "https://three.arcprize.org",
+        seed: int = 0,
+    ):
+        super().__init__()
+        self._game_id = str(game_id)
+        self._size = tuple(map(int, size))
+        self._grid_encoding = str(grid_encoding)
+        self._num_colors = int(num_colors)
+        self._reward_per_level = float(reward_per_level)
+        self._reward_win = float(reward_win)
+        self._reward_loss = float(reward_loss)
+        self._seed = int(seed)
+        self._action_count = 8
+        self._arc = self._make_arcade(
+            arc_api_key=arc_api_key,
+            arc_base_url=arc_base_url,
+            operation_mode=operation_mode,
+            environments_dir=environments_dir,
+            recordings_dir=recordings_dir,
+        )
+        self._GameAction = self._import_game_action()
+        self._env = None
+        self._last_transition = None
+        self.reward_range = [-np.inf, np.inf]
+
+        grid_channels = self._num_colors if self._grid_encoding == "onehot" else 1
+        self._observation_space = gym.spaces.Dict(
+            {
+                "grid": gym.spaces.Box(0.0, 1.0, self._size + (grid_channels,), dtype=np.float32),
+                "state_flags": gym.spaces.Box(0.0, 1.0, (4,), dtype=np.float32),
+                "progress": gym.spaces.Box(-np.inf, np.inf, (3,), dtype=np.float32),
+                "action_mask": gym.spaces.Box(0.0, 1.0, (self._action_count,), dtype=np.float32),
+                "is_first": gym.spaces.Box(0, 1, (), bool),
+                "is_last": gym.spaces.Box(0, 1, (), bool),
+                "is_terminal": gym.spaces.Box(0, 1, (), bool),
+            }
+        )
+        action_shape = (self._action_count, self._size[1], self._size[0])
+        self._action_space = gym.spaces.Box(0.0, 1.0, action_shape, dtype=np.float32)
+        self._action_space.multi_discrete = True
+
+    @property
+    def observation_space(self):
+        return self._observation_space
+
+    @property
+    def action_space(self):
+        return self._action_space
+
+    def reset(self):
+        self._env = self._arc.make(self._game_id)
+        if self._env is None:
+            raise RuntimeError(
+                f"ARC3 environment '{self._game_id}' could not be initialized. "
+                "Check Python >= 3.12, arc-agi installation, OPERATION_MODE, and environment files."
+            )
+        transition = self._read_transition(self._env.observation_space)
+        if transition.state_name.upper() in {"NOT_PLAYED", "GAME_OVER"}:
+            transition = self._apply_action(0, 0, 0)
+        self._last_transition = transition
+        return self._format_obs(transition, is_first=True, is_last=False, is_terminal=False)
+
+    def step(self, action):
+        if self._env is None or self._last_transition is None:
+            raise RuntimeError("ARC3 environment must be reset before stepping.")
+        action_id, x, y = decode_arc_action(action, self._action_count, self._size[1], self._size[0])
+        available_actions = self._last_transition.available_actions
+        invalid_action = bool(available_actions) and int(action_id) not in set(map(int, available_actions))
+        if invalid_action:
+            action_id = int(sorted(set(map(int, available_actions)))[0])
+        transition = self._apply_action(action_id, x, y)
+        reward = derive_arc_reward(
+            self._last_transition.levels_completed,
+            self._last_transition.state_name,
+            transition.levels_completed,
+            transition.state_name,
+            reward_per_level=self._reward_per_level,
+            reward_win=self._reward_win,
+            reward_loss=self._reward_loss,
+        )
+        done = transition.state_name.upper() in {"WIN", "GAME_OVER"}
+        obs = self._format_obs(transition, is_first=False, is_last=done, is_terminal=done)
+        info = {
+            "levels_completed": int(transition.levels_completed),
+            "win_levels": int(transition.win_levels),
+            "available_actions": list(map(int, transition.available_actions)),
+            "invalid_action": invalid_action,
+        }
+        self._last_transition = transition
+        return obs, reward, done, info
+
+    def close(self):
+        self._env = None
+
+    def _make_arcade(
+        self,
+        *,
+        arc_api_key: str,
+        arc_base_url: str,
+        operation_mode: str,
+        environments_dir: str,
+        recordings_dir: str,
+    ):
+        try:
+            from arc_agi import Arcade, OperationMode
+        except Exception as exc:
+            raise RuntimeError(
+                "ARC3 integration requires the 'arc-agi' package and its runtime dependencies."
+            ) from exc
+
+        raw_mode = str(operation_mode).strip().lower()
+        try:
+            mode = OperationMode(raw_mode)
+        except Exception:
+            mode = OperationMode.NORMAL
+        return Arcade(
+            arc_api_key=arc_api_key,
+            arc_base_url=arc_base_url,
+            operation_mode=mode,
+            environments_dir=environments_dir,
+            recordings_dir=recordings_dir,
+        )
+
+    def _import_game_action(self):
+        try:
+            from arcengine import GameAction
+        except Exception as exc:
+            raise RuntimeError("ARC3 integration requires the 'arcengine' package.") from exc
+        return GameAction
+
+    def _build_action(self, action_id: int, x: int, y: int):
+        action = self._GameAction.from_id(int(action_id))
+        if hasattr(action, "is_complex") and action.is_complex():
+            action.set_data({"x": int(x), "y": int(y)})
+        return action
+
+    def _apply_action(self, action_id: int, x: int, y: int) -> Arc3Transition:
+        action = self._build_action(action_id, x, y)
+        data = action.action_data.model_dump() if hasattr(action, "action_data") else {}
+        raw = self._env.step(action, data=data, reasoning={})
+        return self._read_transition(raw)
+
+    def _read_transition(self, raw: Any) -> Arc3Transition:
+        if raw is None:
+            raise ValueError("ARC3 environment returned no frame data.")
+        state_obj = getattr(raw, "state", None)
+        state_name = getattr(state_obj, "name", str(state_obj))
+        available_actions = [int(v) for v in getattr(raw, "available_actions", [])]
+        transition = Arc3Transition(
+            grid=normalize_arc_frame(getattr(raw, "frame", []), self._size),
+            state_name=str(state_name),
+            levels_completed=int(getattr(raw, "levels_completed", 0)),
+            win_levels=int(getattr(raw, "win_levels", 0)),
+            available_actions=available_actions,
+            raw=raw,
+        )
+        return transition
+
+    def _format_obs(self, transition: Arc3Transition, *, is_first: bool, is_last: bool, is_terminal: bool):
+        progress_ratio = 0.0
+        if transition.win_levels > 0:
+            progress_ratio = float(transition.levels_completed) / float(transition.win_levels)
+        return {
+            "grid": encode_arc_grid(transition.grid, self._num_colors, self._grid_encoding),
+            "state_flags": encode_state_flags(transition.state_name),
+            "progress": np.array(
+                [float(transition.levels_completed), float(transition.win_levels), float(progress_ratio)],
+                dtype=np.float32,
+            ),
+            "action_mask": encode_action_mask(transition.available_actions, self._action_count),
+            "is_first": bool(is_first),
+            "is_last": bool(is_last),
+            "is_terminal": bool(is_terminal),
+        }
