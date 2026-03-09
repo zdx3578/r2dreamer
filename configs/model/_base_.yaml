@@ -73,6 +73,7 @@ phase1a:
 
 phase2:
   m_obj_threshold: 0.2
+  match_margin_threshold: 0.02
   warmup_updates: 1000
 
 structured_readout:
@@ -112,6 +113,10 @@ objectification:
   identity_temperature: 0.25
   ema_decay: 0.99
   sinkhorn_iters: 10
+  curriculum_updates: 10000
+  obj_stable_early: 0.50
+  obj_local_early: 0.15
+  obj_rel_early: 0.10
   w_match: 1.0
   w_temp: 1.0
   w_smooth: 0.5

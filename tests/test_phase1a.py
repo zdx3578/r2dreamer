@@ -105,7 +105,7 @@ def make_model_config(cnn_keys, mlp_keys, arc3_grid_keys="^$", use_objectificati
             },
             "r2dreamer": {"lambd": 5e-4},
             "phase1a": {"goal_horizon": 3},
-            "phase2": {"m_obj_threshold": 0.1},
+            "phase2": {"m_obj_threshold": 0.1, "match_margin_threshold": 0.02},
             "rssm": {
                 "stoch": 4,
                 "deter": 64,
@@ -231,6 +231,10 @@ def make_model_config(cnn_keys, mlp_keys, arc3_grid_keys="^$", use_objectificati
                 "identity_temperature": 0.25,
                 "ema_decay": 0.99,
                 "sinkhorn_iters": 10,
+                "curriculum_updates": 100,
+                "obj_stable_early": 0.5,
+                "obj_local_early": 0.15,
+                "obj_rel_early": 0.1,
                 "w_match": 1.0,
                 "w_temp": 1.0,
                 "w_smooth": 0.5,
@@ -329,11 +333,16 @@ class Phase1ATest(unittest.TestCase):
         if use_objectification:
             self.assertIn("loss/obj_stable", metrics)
             self.assertIn("phase1b/m_obj", metrics)
+            self.assertIn("phase1b/slot_match_random", metrics)
+            self.assertIn("phase1b/slot_match_margin", metrics)
             self.assertIn("phase1b/slot_cycle", metrics)
             self.assertIn("phase1b/slot_identity", metrics)
+            self.assertIn("phase1b/object_interface", metrics)
+            self.assertIn("phase1b/obj_stable_scale", metrics)
         if use_phase2:
             self.assertIn("loss/op_assign", metrics)
             self.assertIn("phase2/operator_entropy", metrics)
+            self.assertIn("phase2/match_gate_scale", metrics)
         self.assertEqual(replay.updated[0].shape[:2], first_obs.shape[:2])
         self.assertEqual(replay.updated[1].shape[:2], first_obs.shape[:2])
 

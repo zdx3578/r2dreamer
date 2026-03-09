@@ -82,7 +82,15 @@ class Dreamer(nn.Module):
         self.use_rule_update = bool(getattr(config, "use_rule_update", False))
         self.goal_horizon = int(getattr(getattr(config, "phase1a", {}), "goal_horizon", 3))
         self.phase2_m_obj_threshold = float(getattr(getattr(config, "phase2", {}), "m_obj_threshold", 0.2))
+        self.phase2_match_margin_threshold = float(getattr(getattr(config, "phase2", {}), "match_margin_threshold", 0.02))
         self.phase2_warmup_updates = int(getattr(getattr(config, "phase2", {}), "warmup_updates", 0))
+        objectification_cfg = getattr(config, "objectification", None)
+        self.phase1b_curriculum_updates = int(getattr(objectification_cfg, "curriculum_updates", 0))
+        self.phase1b_early_loss_scales = {
+            "obj_stable": float(getattr(objectification_cfg, "obj_stable_early", self._loss_scales.get("obj_stable", 1.0))),
+            "obj_local": float(getattr(objectification_cfg, "obj_local_early", self._loss_scales.get("obj_local", 1.0))),
+            "obj_rel": float(getattr(objectification_cfg, "obj_rel_early", self._loss_scales.get("obj_rel", 1.0))),
+        }
         self._model_updates = 0
 
         if self.use_effect_model and not self.use_structured_readout:
@@ -682,16 +690,39 @@ class Dreamer(nn.Module):
         metrics = {
             "phase1b/m_obj": out["objectness_score"],
             "phase1b/slot_match": out["slot_match_score"],
+            "phase1b/slot_match_random": out["slot_match_random"],
+            "phase1b/slot_match_margin": out["slot_match_margin"],
+            "phase1b/slot_match_margin_score": out["slot_match_margin_score"],
             "phase1b/slot_cycle": out["slot_cycle_score"],
             "phase1b/slot_identity": out["slot_identity_score"],
             "phase1b/slot_concentration": out["slot_concentration"],
             "phase1b/motif_entropy": out["motif_usage_entropy"],
+            "phase1b/object_interface": out["object_interface_score"],
+            "phase1b/obj_stable_scale": losses["obj_stable"].new_tensor(self._loss_scale_for("obj_stable")),
+            "phase1b/obj_local_scale": losses["obj_local"].new_tensor(self._loss_scale_for("obj_local")),
+            "phase1b/obj_rel_scale": losses["obj_rel"].new_tensor(self._loss_scale_for("obj_rel")),
         }
         return losses, metrics, out
 
-    def _phase2_gate(self, objectness_score):
+    def _loss_scale_for(self, name):
+        scale = float(self._loss_scales[name])
+        if name not in self.phase1b_early_loss_scales or self.phase1b_curriculum_updates <= 0:
+            return scale
+        progress = min(1.0, float(self._model_updates) / float(self.phase1b_curriculum_updates))
+        early = float(self.phase1b_early_loss_scales[name])
+        return early + (scale - early) * progress
+
+    def _phase2_gate(self, objectification_out):
+        objectness_score = objectification_out["objectness_score"]
+        match_margin = objectification_out["slot_match_margin"]
         object_gate = torch.clamp(
             (objectness_score.detach() - self.phase2_m_obj_threshold) / max(1e-6, 1.0 - self.phase2_m_obj_threshold),
+            0.0,
+            1.0,
+        )
+        match_gate = torch.clamp(
+            (match_margin.detach() - self.phase2_match_margin_threshold)
+            / max(1e-6, 1.0 - self.phase2_match_margin_threshold),
             0.0,
             1.0,
         )
@@ -700,7 +731,7 @@ class Dreamer(nn.Module):
         else:
             progress = min(1.0, float(self._model_updates + 1) / float(self.phase2_warmup_updates))
             warmup_gate = objectness_score.new_tensor(progress)
-        return object_gate * warmup_gate, object_gate, warmup_gate
+        return object_gate * match_gate * warmup_gate, object_gate, match_gate, warmup_gate
 
     def _binding_proxy(self, structured):
         target_delta_M = (structured["target_delta_M"].abs() * structured["transition_map_mask"]).mean(dim=(-2, -1))
@@ -764,7 +795,7 @@ class Dreamer(nn.Module):
         sig_out = self.signature_head(op_out["operator_embed"], op_out["context_embed"])
         rule_out = self.rule_update_head(structured["z_eff"], op_out["operator_embed"], bind_out["q_b"], sig_out["q_sigma"])
 
-        gate, object_gate, warmup_gate = self._phase2_gate(structured["objectification_out"]["objectness_score"])
+        gate, object_gate, match_gate, warmup_gate = self._phase2_gate(structured["objectification_out"])
         flat_q = op_out["q_u"].reshape(-1, op_out["q_u"].shape[-1])
         flat_eff = op_out["effect_embed"].reshape(-1, op_out["effect_embed"].shape[-1])
         flat_binding = bind_out["q_b"].reshape(-1, bind_out["q_b"].shape[-1])
@@ -807,6 +838,7 @@ class Dreamer(nn.Module):
         metrics = {
             "phase2/gate_scale": gate,
             "phase2/object_gate_scale": object_gate,
+            "phase2/match_gate_scale": match_gate,
             "phase2/warmup_scale": warmup_gate,
             "phase2/operator_entropy": op_out["sample_entropy"],
             "phase2/operator_usage_entropy": op_out["usage_entropy"],
@@ -1033,7 +1065,7 @@ class Dreamer(nn.Module):
         metrics.update(tools.tensorstats(value, "value_replay"))
         metrics.update(tools.tensorstats(slow_value, "slow_value_replay"))
 
-        total_loss = sum([v * self._loss_scales[k] for k, v in losses.items()])
+        total_loss = sum([v * self._loss_scale_for(k) for k, v in losses.items()])
         self._scaler.scale(total_loss).backward()
 
         metrics.update({f"loss/{name}": loss for name, loss in losses.items()})

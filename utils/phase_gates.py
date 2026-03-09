@@ -104,6 +104,8 @@ def evaluate_phase1b_gate(records, window=5, slot_count=8):
         "train/loss/obj_rel",
         "train/phase1b/m_obj",
         "train/phase1b/slot_match",
+        "train/phase1b/slot_cycle",
+        "train/phase1b/slot_identity",
         "train/phase1b/slot_concentration",
         "train/phase1b/motif_entropy",
     ]
@@ -111,30 +113,52 @@ def evaluate_phase1b_gate(records, window=5, slot_count=8):
 
     m_obj = _recent_values(records, "train/phase1b/m_obj", window)
     slot_match = _recent_values(records, "train/phase1b/slot_match", window)
+    slot_match_random = _recent_values(records, "train/phase1b/slot_match_random", window)
+    slot_match_margin = _recent_values(records, "train/phase1b/slot_match_margin", window)
+    slot_cycle = _recent_values(records, "train/phase1b/slot_cycle", window)
+    slot_identity = _recent_values(records, "train/phase1b/slot_identity", window)
     slot_concentration = _recent_values(records, "train/phase1b/slot_concentration", window)
+    object_interface = _recent_values(records, "train/phase1b/object_interface", window)
     obj_stable = _recent_values(records, "train/loss/obj_stable", window)
     obj_local = _recent_values(records, "train/loss/obj_local", window)
     obj_rel = _recent_values(records, "train/loss/obj_rel", window)
-    random_slot_baseline = 1.0 / float(max(1, slot_count))
+    fallback_random_baseline = 1.0 / float(max(1, slot_count))
+    random_slot_baseline = _mean(slot_match_random) if slot_match_random else fallback_random_baseline
+    if not slot_match_margin and slot_match:
+        slot_match_margin = [value - random_slot_baseline for value in slot_match]
+    if not object_interface and slot_match_margin and slot_cycle and slot_identity and slot_concentration:
+        denom = max(1e-6, 1.0 - random_slot_baseline)
+        object_interface = [
+            max(0.0, margin / denom) + cycle + identity + concentration
+            for margin, cycle, identity, concentration in zip(
+                slot_match_margin, slot_cycle, slot_identity, slot_concentration
+            )
+        ]
+        object_interface = [value / 4.0 for value in object_interface]
 
-    slot_matching_better_than_random = bool(slot_match and _mean(slot_match) > random_slot_baseline)
+    match_margin_threshold = 0.02
+    slot_cycle_threshold = 0.5
+    slot_identity_threshold = 0.2
+    object_interface_threshold = 0.25
+
+    slot_matching_better_than_random = bool(slot_match_margin and _mean(slot_match_margin) > match_margin_threshold)
     locality_better_than_random = bool(slot_concentration and _mean(slot_concentration) > random_slot_baseline)
+    slot_cycle_healthy = bool(slot_cycle and _mean(slot_cycle) > slot_cycle_threshold)
+    slot_identity_healthy = bool(slot_identity and _mean(slot_identity) > slot_identity_threshold)
+    object_interface_healthy = bool(object_interface and _mean(object_interface) > object_interface_threshold)
     object_losses_finite = bool(obj_stable and obj_local and obj_rel)
     m_obj_nontrivial = bool(m_obj and 0.05 < _mean(m_obj) < 0.95)
-    m_obj_slope = _slope(m_obj)
-    trend_available = m_obj_slope is not None
-    m_obj_rising = bool(trend_available and m_obj_slope > 0.0)
-    m_obj_plateau = bool(m_obj and _mean(m_obj) > 0.2 and (not trend_available or m_obj_slope > -1e-3))
-    m_obj_healthy = bool(m_obj_rising or m_obj_plateau)
 
     checks = {
         "phase1a_ready": phase1a["ready"],
         "has_required_metrics": has_required,
         "slot_matching_better_than_random": slot_matching_better_than_random,
         "locality_better_than_random": locality_better_than_random,
+        "slot_cycle_healthy": slot_cycle_healthy,
+        "slot_identity_healthy": slot_identity_healthy,
+        "object_interface_healthy": object_interface_healthy,
         "object_losses_finite": object_losses_finite,
         "m_obj_nontrivial": m_obj_nontrivial,
-        "m_obj_healthy": m_obj_healthy,
     }
     return {
         "phase": "phase1b",
@@ -142,13 +166,14 @@ def evaluate_phase1b_gate(records, window=5, slot_count=8):
         "checks": checks,
         "summary": {
             "m_obj_mean": _mean(m_obj),
-            "m_obj_slope": m_obj_slope,
-            "m_obj_rising": m_obj_rising,
-            "m_obj_plateau": m_obj_plateau,
             "slot_match_mean": _mean(slot_match),
+            "slot_match_random_mean": _mean(slot_match_random) if slot_match_random else None,
+            "slot_match_margin_mean": _mean(slot_match_margin),
+            "slot_cycle_mean": _mean(slot_cycle),
+            "slot_identity_mean": _mean(slot_identity),
             "slot_concentration_mean": _mean(slot_concentration),
+            "object_interface_mean": _mean(object_interface),
             "random_slot_baseline": random_slot_baseline,
-            "trend_available": trend_available,
         },
         "phase1a": phase1a,
     }
@@ -178,6 +203,7 @@ def evaluate_phase2_gate(records, window=5, slot_count=8):
     signature_std = _recent_values(records, "train/phase2/signature_std", window)
     rule_delta_abs = _recent_values(records, "train/phase2/rule_delta_abs", window)
     gate_scale = _recent_values(records, "train/phase2/gate_scale", window)
+    match_gate_scale = _recent_values(records, "train/phase2/match_gate_scale", window)
 
     operator_not_collapsed = bool(operator_entropy and usage_entropy and _mean(operator_entropy) > 0.1 and _mean(usage_entropy) > 0.1)
     binding_not_noise = bool(binding_entropy and 0.1 < _mean(binding_entropy) < 0.98)
@@ -205,6 +231,7 @@ def evaluate_phase2_gate(records, window=5, slot_count=8):
             "signature_std_mean": _mean(signature_std),
             "rule_delta_abs_mean": _mean(rule_delta_abs),
             "gate_scale_mean": _mean(gate_scale),
+            "match_gate_scale_mean": _mean(match_gate_scale),
         },
         "phase1b": phase1b,
     }

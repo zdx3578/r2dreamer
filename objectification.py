@@ -61,16 +61,29 @@ class ObjectificationModule(nn.Module):
         loss_obj_rel = self.w_pair * rel["loss_pair"] + self.w_motif * rel["loss_motif"] + self.w_reuse * rel["loss_reuse"]
 
         m_obj = self._objectness_score(loss_obj_stable, loss_obj_local, loss_obj_rel)
+        object_interface_score = torch.stack(
+            [
+                stable["match_margin_score"],
+                stable["cycle_score"],
+                stable["identity_score"],
+                torch.clamp(local["slot_concentration"].detach(), 0.0, 1.0),
+            ]
+        ).mean()
+        object_interface_score = torch.clamp(object_interface_score, 0.0, 1.0)
         return {
             "loss_obj_stable": loss_obj_stable,
             "loss_obj_local": loss_obj_local,
             "loss_obj_rel": loss_obj_rel,
             "objectness_score": m_obj,
             "slot_match_score": stable["match_score"],
+            "slot_match_random": stable["match_random_score"],
+            "slot_match_margin": stable["match_margin"],
+            "slot_match_margin_score": stable["match_margin_score"],
             "slot_cycle_score": stable["cycle_score"],
             "slot_identity_score": stable["identity_score"],
             "slot_concentration": local["slot_concentration"],
             "motif_usage_entropy": rel["motif_usage_entropy"],
+            "object_interface_score": object_interface_score,
         }
 
     def _weighted_mean(self, value, weight):
@@ -125,6 +138,9 @@ class ObjectificationModule(nn.Module):
             loss_contrast = (contrast_err * contrast_weight).sum() / contrast_weight.sum().clamp_min(1e-6)
 
         match_score = match_confidence(match)
+        match_random_score = self._shuffled_match_baseline(current, nxt)
+        match_margin = match_score - match_random_score
+        match_margin_score = torch.clamp(match_margin / (1.0 - match_random_score).clamp_min(1e-6), 0.0, 1.0)
         return {
             "loss_match": loss_match,
             "loss_temp": loss_temp,
@@ -132,9 +148,26 @@ class ObjectificationModule(nn.Module):
             "loss_cycle": loss_cycle,
             "loss_contrast": loss_contrast,
             "match_score": match_score,
+            "match_random_score": match_random_score,
+            "match_margin": match_margin,
+            "match_margin_score": match_margin_score,
             "cycle_score": torch.clamp(1.0 - loss_cycle.detach(), 0.0, 1.0),
             "identity_score": torch.clamp(torch.exp(-loss_contrast.detach()), 0.0, 1.0),
         }
+
+    def _shuffled_match_baseline(self, current, nxt):
+        flat_current = current.reshape(-1, self.obj_slots, current.shape[-1])
+        flat_nxt = nxt.reshape(-1, self.obj_slots, nxt.shape[-1])
+        if flat_current.shape[0] <= 1:
+            return current.new_tensor(1.0 / float(max(1, self.obj_slots)))
+        shuffled_nxt = flat_nxt.roll(shifts=1, dims=0).reshape_as(nxt)
+        shuffled_match = soft_slot_alignment(
+            current,
+            shuffled_nxt,
+            self.temperature,
+            sinkhorn_iters=self.sinkhorn_iters,
+        )
+        return match_confidence(shuffled_match)
 
     def _local_losses(self, target_delta_O, delta_O_pred, slot_weight):
         return self.cf_locality(target_delta_O, delta_O_pred, slot_weight)
