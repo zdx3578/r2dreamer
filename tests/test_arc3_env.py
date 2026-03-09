@@ -92,6 +92,30 @@ class _FakeArcade:
         return _FakeArcEnv()
 
 
+class _SmallFakeArcEnv:
+    def __init__(self):
+        self.observation_space = _FakeRawFrame(
+            frame=[[0]],
+            state_name="NOT_PLAYED",
+            levels_completed=0,
+            win_levels=1,
+            available_actions=[0],
+        )
+
+    def step(self, action, data=None, reasoning=None):
+        if action.value == 0:
+            return _FakeRawFrame([[0, 1], [2, 3]], "PLAYING", 0, 1, [1])
+        return _FakeRawFrame([[4]], "WIN", 1, 1, [0])
+
+
+class _SmallFakeArcade:
+    def __init__(self, **kwargs):
+        self.kwargs = kwargs
+
+    def make(self, game_id):
+        return _SmallFakeArcEnv()
+
+
 class _FakeOperationMode:
     NORMAL = "normal"
     OFFLINE = "offline"
@@ -198,6 +222,33 @@ class Arc3EnvTest(unittest.TestCase):
             self.assertIn("frame_shape", info)
             self.assertEqual(tuple(info["frame_shape"]), (64, 64))
             self.assertEqual(float(next_obs["action_context"][4]), 0.0)
+        finally:
+            if old_arc_agi is None:
+                sys.modules.pop("arc_agi", None)
+            else:
+                sys.modules["arc_agi"] = old_arc_agi
+            if old_arcengine is None:
+                sys.modules.pop("arcengine", None)
+            else:
+                sys.modules["arcengine"] = old_arcengine
+
+    def test_arc3_custom_special_tokens_preserve_padding(self):
+        fake_arc_agi = types.ModuleType("arc_agi")
+        fake_arc_agi.Arcade = _SmallFakeArcade
+        fake_arc_agi.OperationMode = _FakeOperationMode()
+        fake_arcengine = types.ModuleType("arcengine")
+        fake_arcengine.GameAction = _FakeGameAction
+
+        old_arc_agi = sys.modules.get("arc_agi")
+        old_arcengine = sys.modules.get("arcengine")
+        sys.modules["arc_agi"] = fake_arc_agi
+        sys.modules["arcengine"] = fake_arcengine
+        try:
+            env = Arc3Grid("ls20", size=(4, 4), grid_encoding="onehot", num_colors=8, num_special_tokens=2)
+            obs = env.reset()
+            self.assertEqual(obs["grid"].shape, (4, 4, 10))
+            self.assertEqual(int(np.argmax(obs["grid"][0, 0])), 0)
+            self.assertEqual(int(np.argmax(obs["grid"][3, 3])), 8)
         finally:
             if old_arc_agi is None:
                 sys.modules.pop("arc_agi", None)

@@ -68,6 +68,7 @@ def make_env(config, id):
             size=tuple(config.size),
             grid_encoding=config.grid_encoding,
             num_colors=config.num_colors,
+            num_special_tokens=getattr(config, "num_special_tokens", 1),
             reward_per_level=config.reward_per_level,
             reward_win=config.reward_win,
             reward_loss=config.reward_loss,

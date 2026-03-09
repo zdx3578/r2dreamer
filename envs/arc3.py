@@ -260,6 +260,7 @@ class Arc3Grid(gym.Env):
         size: tuple[int, int] = (64, 64),
         grid_encoding: str = "token",
         num_colors: int = 16,
+        num_special_tokens: int = 1,
         reward_per_level: float = 1.0,
         reward_win: float = 10.0,
         reward_loss: float = 0.0,
@@ -275,7 +276,7 @@ class Arc3Grid(gym.Env):
         self._size = tuple(map(int, size))
         self._grid_encoding = str(grid_encoding)
         self._num_colors = int(num_colors)
-        self._num_special_tokens = 1
+        self._num_special_tokens = max(1, int(num_special_tokens))
         self._pad_token_id = self._num_colors
         self._reward_per_level = float(reward_per_level)
         self._reward_win = float(reward_win)
