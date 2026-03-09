@@ -95,6 +95,8 @@ class Dreamer(nn.Module):
         self.phase2_memory_binding_threshold = float(
             getattr(phase2_cfg, "memory_write_binding_threshold", 0.30 if legacy_write_threshold is None else legacy_write_threshold)
         )
+        self.phase2_memory_agreement_threshold = float(getattr(phase2_cfg, "memory_agreement_threshold", 0.7))
+        self.phase2_memory_agreement_delta_threshold = float(getattr(phase2_cfg, "memory_agreement_delta_threshold", 1e-3))
         objectification_cfg = getattr(config, "objectification", None)
         self.phase1b_curriculum_updates = int(getattr(objectification_cfg, "curriculum_updates", 0))
         self.phase1b_early_loss_scales = {
@@ -314,6 +316,7 @@ class Dreamer(nn.Module):
             modules.update({"rule_memory": self.rule_memory, "rule_apply": self.rule_apply})
             self._loss_scales.setdefault("rule_apply", 1.0)
             self._loss_scales.setdefault("memory_read", 1.0)
+            self._loss_scales.setdefault("memory_agreement", 1.0)
         # count number of parameters in each module
         for key, module in modules.items():
             if isinstance(module, nn.Parameter):
@@ -925,6 +928,19 @@ class Dreamer(nn.Module):
             structured["transition_valid_ratio"] * artifact.memory_conf.detach(),
             kind="smooth_l1",
         )
+        agreement_mask = (
+            (artifact.memory_conf.detach() >= self.phase2_memory_agreement_threshold).to(artifact.memory_conf.dtype)
+            * (structured["target_delta_rho"].abs().mean(dim=-1, keepdim=True) >= self.phase2_memory_agreement_delta_threshold).to(
+                artifact.memory_conf.dtype
+            )
+            * structured["transition_valid_ratio"]
+        )
+        memory_agreement = F.cosine_similarity(
+            artifact.delta_rule_pred.reshape(-1, artifact.delta_rule_pred.shape[-1]),
+            artifact.memory_delta_rule.detach().reshape(-1, artifact.memory_delta_rule.shape[-1]) + 1e-6,
+            dim=-1,
+        ).reshape_as(agreement_mask)
+        memory_agreement_loss = (((1.0 - memory_agreement) * 0.5) * agreement_mask).sum() / agreement_mask.sum().clamp_min(1e-6)
         rule_apply_loss = self._weighted_loss(
             artifact.rho_next_pred, structured["nxt"]["rho_t"], structured["transition_valid_ratio"], kind="smooth_l1"
         )
@@ -942,6 +958,7 @@ class Dreamer(nn.Module):
             "sig_impact": artifact.gate * sig_impact,
             "rule_update": artifact.gate * rule_update_loss,
             "memory_read": artifact.gate * memory_read_loss,
+            "memory_agreement": artifact.gate * memory_agreement_loss,
             "rule_apply": artifact.gate * rule_apply_loss,
         }
         retrieval_agreement = F.cosine_similarity(
@@ -976,6 +993,8 @@ class Dreamer(nn.Module):
             "phase2/retrieval_peak": artifact.memory_top_weight.mean(),
             "phase2/retrieval_agreement": retrieval_agreement,
             "phase2/memory_read_error": memory_read_loss.detach(),
+            "phase2/memory_agreement_error": memory_agreement_loss.detach(),
+            "phase2/memory_agreement_coverage": agreement_mask.mean(),
             "phase2/rule_apply_error": rule_apply_loss.detach(),
             "phase2/pred_delta_rule_abs": artifact.delta_rule_pred.abs().mean(),
             "phase2/retrieved_delta_rule_abs": artifact.memory_delta_rule.abs().mean(),

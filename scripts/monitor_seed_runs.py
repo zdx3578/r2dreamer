@@ -33,6 +33,8 @@ PEAK_METRICS = {
     "phase2_rule_memory_entropy": {"key": "train/phase2/rule_memory_entropy", "mode": "max"},
     "phase2_rule_memory_write_rate": {"key": "train/phase2/rule_memory_write_rate", "mode": "max"},
     "phase2_memory_read_error": {"key": "train/phase2/memory_read_error", "mode": "min"},
+    "phase2_memory_agreement_error": {"key": "train/phase2/memory_agreement_error", "mode": "min"},
+    "phase2_memory_agreement_coverage": {"key": "train/phase2/memory_agreement_coverage", "mode": "max"},
     "phase2_rule_apply_error": {"key": "train/phase2/rule_apply_error", "mode": "min"},
     "ret": {"key": "train/ret", "mode": "max"},
 }

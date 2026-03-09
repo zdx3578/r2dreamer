@@ -67,6 +67,7 @@ loss_scales:
   sig_impact: 0.05
   rule_update: 0.1
   memory_read: 0.05
+  memory_agreement: 0.05
   rule_apply: 0.1
 
 r2dreamer:
@@ -86,6 +87,8 @@ phase2:
   memory_conf_logit_scale: 1.0
   memory_signature_logit_scale: 1.0
   memory_ema_decay: 0.99
+  memory_agreement_threshold: 0.7
+  memory_agreement_delta_threshold: 0.001
   use_memory_fusion: True
 
 structured_readout:
