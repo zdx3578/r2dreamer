@@ -73,6 +73,7 @@ phase1a:
 
 phase2:
   m_obj_threshold: 0.2
+  warmup_updates: 1000
 
 structured_readout:
   layers: 2

@@ -82,6 +82,8 @@ class Dreamer(nn.Module):
         self.use_rule_update = bool(getattr(config, "use_rule_update", False))
         self.goal_horizon = int(getattr(getattr(config, "phase1a", {}), "goal_horizon", 3))
         self.phase2_m_obj_threshold = float(getattr(getattr(config, "phase2", {}), "m_obj_threshold", 0.2))
+        self.phase2_warmup_updates = int(getattr(getattr(config, "phase2", {}), "warmup_updates", 0))
+        self._model_updates = 0
 
         if self.use_effect_model and not self.use_structured_readout:
             raise ValueError("Effect model requires use_structured_readout=True.")
@@ -494,6 +496,7 @@ class Dreamer(nn.Module):
         self._scaler.update()  # adjust scale
         self._scheduler.step()  # increment scheduler
         self._optimizer.zero_grad(set_to_none=True)  # reset grads
+        self._model_updates += 1
         mets["opt/lr"] = self._scheduler.get_last_lr()[0]
         mets["opt/grad_scale"] = self._scaler.get_scale()
         if self._log_grads:
@@ -685,11 +688,17 @@ class Dreamer(nn.Module):
         return losses, metrics, out
 
     def _phase2_gate(self, objectness_score):
-        return torch.clamp(
+        object_gate = torch.clamp(
             (objectness_score.detach() - self.phase2_m_obj_threshold) / max(1e-6, 1.0 - self.phase2_m_obj_threshold),
             0.0,
             1.0,
         )
+        if self.phase2_warmup_updates <= 0:
+            warmup_gate = objectness_score.new_tensor(1.0)
+        else:
+            progress = min(1.0, float(self._model_updates + 1) / float(self.phase2_warmup_updates))
+            warmup_gate = objectness_score.new_tensor(progress)
+        return object_gate * warmup_gate, object_gate, warmup_gate
 
     def _binding_proxy(self, structured):
         target_delta_M = (structured["target_delta_M"].abs() * structured["transition_map_mask"]).mean(dim=(-2, -1))
@@ -753,7 +762,7 @@ class Dreamer(nn.Module):
         sig_out = self.signature_head(op_out["operator_embed"], op_out["context_embed"])
         rule_out = self.rule_update_head(structured["z_eff"], op_out["operator_embed"], bind_out["q_b"], sig_out["q_sigma"])
 
-        gate = self._phase2_gate(structured["objectification_out"]["objectness_score"])
+        gate, object_gate, warmup_gate = self._phase2_gate(structured["objectification_out"]["objectness_score"])
         flat_q = op_out["q_u"].reshape(-1, op_out["q_u"].shape[-1])
         flat_eff = op_out["effect_embed"].reshape(-1, op_out["effect_embed"].shape[-1])
         flat_binding = bind_out["q_b"].reshape(-1, bind_out["q_b"].shape[-1])
@@ -795,6 +804,8 @@ class Dreamer(nn.Module):
         }
         metrics = {
             "phase2/gate_scale": gate,
+            "phase2/object_gate_scale": object_gate,
+            "phase2/warmup_scale": warmup_gate,
             "phase2/operator_entropy": op_out["sample_entropy"],
             "phase2/operator_usage_entropy": op_out["usage_entropy"],
             "phase2/operator_usage_max": op_out["avg_usage"].max(),
