@@ -1,9 +1,15 @@
 import argparse
 import json
 import os
-import signal
+import sys
 import time
 from pathlib import Path
+
+ROOT_DIR = Path(__file__).resolve().parents[1]
+if str(ROOT_DIR) not in sys.path:
+    sys.path.insert(0, str(ROOT_DIR))
+
+from utils.phase_gates import evaluate_phase1b_gate, evaluate_phase2_gate, load_metrics_records
 
 
 def _pid_alive(pid: int) -> bool:
@@ -30,6 +36,49 @@ def _seed_status(seed_dir: Path) -> str:
     return "not started"
 
 
+def _safe_mean(values):
+    vals = [float(v) for v in values if isinstance(v, (int, float))]
+    return sum(vals) / len(vals) if vals else None
+
+
+def _write_final_summary(root: Path):
+    aggregate = {"phase1b_ready": [], "phase2_ready": [], "slot_match_mean": [], "m_obj_mean": [], "ret_last": []}
+    for seed_dir in sorted(root.glob("seed_*")):
+        metrics = seed_dir / "metrics.jsonl"
+        if not metrics.exists() or metrics.stat().st_size == 0:
+            continue
+        records = load_metrics_records(metrics)
+        phase1b = evaluate_phase1b_gate(records)
+        phase2 = evaluate_phase2_gate(records)
+        rows = [json.loads(line) for line in metrics.read_text().splitlines() if line.strip()]
+        ret_last = None
+        for row in reversed(rows):
+            if "train/ret" in row:
+                ret_last = row["train/ret"]
+                break
+        seed_summary = {
+            "seed": seed_dir.name,
+            "phase1b": phase1b,
+            "phase2": phase2,
+            "ret_last": ret_last,
+        }
+        (seed_dir / "final_summary.json").write_text(json.dumps(seed_summary, indent=2, ensure_ascii=False) + "\n")
+        aggregate["phase1b_ready"].append(bool(phase1b["ready"]))
+        aggregate["phase2_ready"].append(bool(phase2["ready"]))
+        aggregate["slot_match_mean"].append(phase1b["summary"]["slot_match_mean"])
+        aggregate["m_obj_mean"].append(phase1b["summary"]["m_obj_mean"])
+        aggregate["ret_last"].append(ret_last)
+
+    overall = {
+        "all_phase1b_ready": all(aggregate["phase1b_ready"]) if aggregate["phase1b_ready"] else False,
+        "all_phase2_ready": all(aggregate["phase2_ready"]) if aggregate["phase2_ready"] else False,
+        "slot_match_mean_avg": _safe_mean(aggregate["slot_match_mean"]),
+        "m_obj_mean_avg": _safe_mean(aggregate["m_obj_mean"]),
+        "ret_last_avg": _safe_mean(aggregate["ret_last"]),
+    }
+    (root / "final_summary.json").write_text(json.dumps(overall, indent=2, ensure_ascii=False) + "\n")
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("root")
@@ -54,6 +103,7 @@ def main():
         log_path.write_text(text)
 
         if args.pids and not any(_pid_alive(pid) for pid in args.pids):
+            _write_final_summary(root)
             done_path.write_text(f"all seeds finished at {time.strftime('%F %T')}\n")
             break
         time.sleep(args.interval)
