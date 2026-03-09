@@ -38,23 +38,27 @@ class Arc3GridEncoder(nn.Module):
         self.row_embed = nn.Embedding(h, self.token_dim)
         self.col_embed = nn.Embedding(w, self.token_dim)
 
-        layers = []
+        blocks = []
+        stage_shapes = []
         in_dim = self.token_dim
         padding = self.kernel_size // 2
         for depth in self.depths:
-            layers.append(nn.Conv2d(in_dim, depth, self.kernel_size, stride=1, padding=padding, bias=True))
-            layers.append(nn.MaxPool2d(2, 2))
+            stage_layers = [nn.Conv2d(in_dim, depth, self.kernel_size, stride=1, padding=padding, bias=True), nn.MaxPool2d(2, 2)]
             if config.norm:
-                layers.append(Arc3RMSNorm2D(depth, eps=1e-04, dtype=torch.float32))
-            layers.append(act())
+                stage_layers.append(Arc3RMSNorm2D(depth, eps=1e-04, dtype=torch.float32))
+            stage_layers.append(act())
+            blocks.append(nn.Sequential(*stage_layers))
             in_dim = depth
             h, w = h // 2, w // 2
+            stage_shapes.append((h, w, depth))
 
         self.out_dim = self.depths[-1] * h * w
-        self.layers = nn.Sequential(*layers)
+        self.readout_stage = max(0, len(stage_shapes) - 2)
+        self.spatial_shape = stage_shapes[self.readout_stage]
+        self.blocks = nn.ModuleList(blocks)
         self.apply(tools.weight_init_)
 
-    def forward(self, obs):
+    def forward(self, obs, return_spatial=False):
         # (..., H, W, C)
         batch_shape = obs.shape[:-3]
         x = obs.reshape(-1, *obs.shape[-3:])
@@ -68,9 +72,20 @@ class Arc3GridEncoder(nn.Module):
 
         # (B*, D, H, W)
         x = x.permute(0, 3, 1, 2)
-        x = self.layers(x)
-        x = x.reshape(x.shape[0], -1)
-        return x.reshape(*batch_shape, x.shape[-1])
+        spatial_readout = None
+        for idx, block in enumerate(self.blocks):
+            x = block(x)
+            if idx == self.readout_stage:
+                spatial_readout = x
+        spatial = x.permute(0, 2, 3, 1)
+        flat = spatial.reshape(spatial.shape[0], -1)
+        flat = flat.reshape(*batch_shape, flat.shape[-1])
+        if not return_spatial:
+            return flat
+        if spatial_readout is None:
+            spatial_readout = x
+        spatial = spatial_readout.permute(0, 2, 3, 1).reshape(*batch_shape, *self.spatial_shape)
+        return flat, spatial
 
     def _to_token_ids(self, grid):
         if grid.shape[-1] > 1:

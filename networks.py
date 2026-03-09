@@ -121,6 +121,8 @@ class MultiEncoder(nn.Module):
         self.out_dim = 0
         self.selectors = []
         self.encoders = []
+        self.spatial_branch_idx = None
+        self.spatial_shape = None
         if self.arc3_grid_shapes:
             if len(self.arc3_grid_shapes) != 1:
                 raise NotImplementedError("Arc3GridEncoder currently supports a single grid input.")
@@ -128,12 +130,18 @@ class MultiEncoder(nn.Module):
             self.encoders.append(Arc3GridEncoder(config.arc3_grid, shape))
             self.selectors.append(lambda obs, key=key: obs[key])
             self.out_dim += self.encoders[-1].out_dim
+            if self.spatial_shape is None and hasattr(self.encoders[-1], "spatial_shape"):
+                self.spatial_branch_idx = len(self.encoders) - 1
+                self.spatial_shape = tuple(self.encoders[-1].spatial_shape)
         if self.cnn_shapes:
             input_ch = sum([v[-1] for v in self.cnn_shapes.values()])
             input_shape = tuple(self.cnn_shapes.values())[0][:2] + (input_ch,)
             self.encoders.append(ConvEncoder(config.cnn, input_shape))
             self.selectors.append(lambda obs: torch.cat([obs[k] for k in self.cnn_shapes], -1))
             self.out_dim += self.encoders[-1].out_dim
+            if self.spatial_shape is None and hasattr(self.encoders[-1], "spatial_shape"):
+                self.spatial_branch_idx = len(self.encoders) - 1
+                self.spatial_shape = tuple(self.encoders[-1].spatial_shape)
         if self.mlp_shapes:
             inp_dim = sum([sum(v) for v in self.mlp_shapes.values()])
             self.encoders.append(MLP(config.mlp, inp_dim))
@@ -150,10 +158,21 @@ class MultiEncoder(nn.Module):
 
         self.apply(weight_init_)
 
-    def forward(self, obs):
+    def forward(self, obs, return_aux=False):
         """Encode a dict of observations."""
         # dict of (B, T, *)
-        return self.fuser([enc(sel(obs)) for enc, sel in zip(self.encoders, self.selectors)])
+        outputs = []
+        spatial = None
+        for idx, (enc, sel) in enumerate(zip(self.encoders, self.selectors)):
+            if return_aux and idx == self.spatial_branch_idx:
+                out, spatial = enc(sel(obs), return_spatial=True)
+            else:
+                out = enc(sel(obs))
+            outputs.append(out)
+        fused = self.fuser(outputs)
+        if not return_aux:
+            return fused
+        return fused, {"spatial": spatial}
 
 
 class MultiDecoder(nn.Module):
@@ -212,9 +231,10 @@ class ConvEncoder(nn.Module):
         self.depths = tuple(int(config.depth) * int(mult) for mult in list(config.mults))
         self.kernel_size = int(config.kernel_size)
         in_dim = input_ch
-        layers = []
+        blocks = []
+        stage_shapes = []
         for i, depth in enumerate(self.depths):
-            layers.append(
+            stage_layers = [
                 Conv2dSamePad(
                     in_channels=in_dim,
                     out_channels=depth,
@@ -222,18 +242,22 @@ class ConvEncoder(nn.Module):
                     stride=1,
                     bias=True,
                 )
-            )
-            layers.append(nn.MaxPool2d(2, 2))
+            ]
+            stage_layers.append(nn.MaxPool2d(2, 2))
             if config.norm:
-                layers.append(RMSNorm2D(depth, eps=1e-04, dtype=torch.float32))
-            layers.append(act())
+                stage_layers.append(RMSNorm2D(depth, eps=1e-04, dtype=torch.float32))
+            stage_layers.append(act())
+            blocks.append(nn.Sequential(*stage_layers))
             in_dim = depth
             h, w = h // 2, w // 2
+            stage_shapes.append((h, w, depth))
 
         self.out_dim = self.depths[-1] * h * w
-        self.layers = nn.Sequential(*layers)
+        self.readout_stage = max(0, len(stage_shapes) - 2)
+        self.spatial_shape = stage_shapes[self.readout_stage]
+        self.blocks = nn.ModuleList(blocks)
 
-    def forward(self, obs):
+    def forward(self, obs, return_spatial=False):
         """Encode image-like observations with a CNN."""
         # (B, T, H, W, C)
         obs = obs - 0.5
@@ -241,12 +265,20 @@ class ConvEncoder(nn.Module):
         x = obs.reshape(-1, *obs.shape[-3:])
         # (B*T, C, H, W)
         x = x.permute(0, 3, 1, 2)
-        # (B*T, C_feat, H_feat, W_feat)
-        x = self.layers(x)
-        # (B*T, C_feat*H_feat*W_feat)
-        x = x.reshape(x.shape[0], -1)
-        # (B, T, C_feat*H_feat*W_feat)
-        return x.reshape(*obs.shape[:-3], x.shape[-1])
+        spatial_readout = None
+        for idx, block in enumerate(self.blocks):
+            x = block(x)
+            if idx == self.readout_stage:
+                spatial_readout = x
+        spatial = x.permute(0, 2, 3, 1)
+        flat = spatial.reshape(spatial.shape[0], -1)
+        flat = flat.reshape(*obs.shape[:-3], flat.shape[-1])
+        if not return_spatial:
+            return flat
+        if spatial_readout is None:
+            spatial_readout = x
+        spatial = spatial_readout.permute(0, 2, 3, 1).reshape(*obs.shape[:-3], *self.spatial_shape)
+        return flat, spatial
 
 
 class ConvDecoder(nn.Module):

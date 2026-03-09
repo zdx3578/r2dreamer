@@ -159,6 +159,7 @@ class Dreamer(nn.Module):
                 self.rssm.feat_size,
                 config.act,
                 bool(config.norm),
+                spatial_shape=getattr(self.encoder, "spatial_shape", None),
             )
             modules.update({"structured_readout": self.structured_readout})
             self._loss_scales.setdefault("struct_map", 1.0)
@@ -506,7 +507,7 @@ class Dreamer(nn.Module):
         replay_buffer.update(index, stoch.detach(), deter.detach())
         return metrics
 
-    def _build_structured_context(self, feat, data, initial):
+    def _build_structured_context(self, feat, data, initial, encoder_aux=None):
         initial_feat = self.rssm.get_feat(initial[0], initial[1]).unsqueeze(1)
         feat_seq = torch.cat([initial_feat, feat], dim=1)
         valid_mask = data.get("valid_mask")
@@ -514,7 +515,12 @@ class Dreamer(nn.Module):
             valid_mask_seq = torch.cat([valid_mask[:, :1], valid_mask], dim=1)
         else:
             valid_mask_seq = None
-        readouts = self.structured_readout(feat_seq, valid_mask=valid_mask_seq)
+        spatial = None if encoder_aux is None else encoder_aux.get("spatial")
+        if spatial is not None:
+            spatial_seq = torch.cat([spatial[:, :1], spatial], dim=1)
+        else:
+            spatial_seq = None
+        readouts = self.structured_readout(feat_seq, valid_mask=valid_mask_seq, spatial=spatial_seq)
         current = {
             "M_t": readouts["M_t"][:, :-1],
             "O_t": readouts["O_t"][:, :-1],
@@ -837,7 +843,11 @@ class Dreamer(nn.Module):
 
         # === World model: posterior rollout and KL losses ===
         # (B, T, E)
-        embed = self.encoder(data)
+        if self.use_structured_readout:
+            embed, encoder_aux = self.encoder(data, return_aux=True)
+        else:
+            embed = self.encoder(data)
+            encoder_aux = None
         # (B, T, S, K), (B, T, D), (B, T, S, K)
         post_stoch, post_deter, post_logit = self.rssm.observe(embed, data["action"], initial, data["is_first"])
         # (B, T, S, K)
@@ -908,7 +918,7 @@ class Dreamer(nn.Module):
         metrics["dyn_entropy"] = torch.mean(self.rssm.get_dist(prior_logit).entropy())
         metrics["rep_entropy"] = torch.mean(self.rssm.get_dist(post_logit).entropy())
         if self.use_structured_readout:
-            structured = self._build_structured_context(feat, data, initial)
+            structured = self._build_structured_context(feat, data, initial, encoder_aux=encoder_aux)
             phase1a_losses, phase1a_metrics = self._phase1a_losses(structured, data)
             losses.update(phase1a_losses)
             metrics.update(phase1a_metrics)

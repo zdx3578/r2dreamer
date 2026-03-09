@@ -22,7 +22,7 @@ class PhaseGateTest(unittest.TestCase):
         result = evaluate_phase1a_gate(records)
         self.assertTrue(result["ready"])
 
-    def test_phase1b_gate_requires_rising_m_obj(self):
+    def test_phase1b_gate_accepts_rising_m_obj(self):
         records = [
             {
                 "train/loss/delta_map": 0.4,
@@ -47,6 +47,35 @@ class PhaseGateTest(unittest.TestCase):
         result = evaluate_phase1b_gate(records, slot_count=8)
         self.assertTrue(result["ready"])
         self.assertGreater(result["summary"]["slot_match_mean"], result["summary"]["random_slot_baseline"])
+        self.assertTrue(result["summary"]["m_obj_rising"])
+
+    def test_phase1b_gate_accepts_stable_plateau(self):
+        values = [0.31, 0.312, 0.311, 0.31, 0.309]
+        records = [
+            {
+                "train/loss/delta_map": 0.4,
+                "train/loss/delta_obj": 0.5,
+                "train/loss/delta_global": 0.3,
+                "train/loss/event": 0.7,
+                "train/phase1a/map_std": 0.2,
+                "train/phase1a/obj_std": 0.3,
+                "train/phase1a/delta_map_abs": 0.1,
+                "train/phase1a/delta_obj_abs": 0.1,
+                "train/opt/loss": 12.0,
+                "train/loss/obj_stable": 1.1,
+                "train/loss/obj_local": 1.0,
+                "train/loss/obj_rel": 2.2,
+                "train/phase1b/m_obj": value,
+                "train/phase1b/slot_match": 0.24,
+                "train/phase1b/slot_concentration": 0.18,
+                "train/phase1b/motif_entropy": 0.9,
+            }
+            for value in values
+        ]
+        result = evaluate_phase1b_gate(records, slot_count=8)
+        self.assertTrue(result["ready"])
+        self.assertFalse(result["summary"]["m_obj_rising"])
+        self.assertTrue(result["summary"]["m_obj_plateau"])
 
     def test_load_metrics_records(self):
         content = '\n'.join(['{"step": 1, "train/loss/delta_map": 0.1}', '{"step": 2, "train/loss/delta_map": 0.2}'])

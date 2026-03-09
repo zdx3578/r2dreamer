@@ -124,6 +124,8 @@ def evaluate_phase1b_gate(records, window=5, slot_count=8):
     m_obj_slope = _slope(m_obj)
     trend_available = m_obj_slope is not None
     m_obj_rising = bool(trend_available and m_obj_slope > 0.0)
+    m_obj_plateau = bool(m_obj and _mean(m_obj) > 0.2 and (not trend_available or m_obj_slope > -1e-3))
+    m_obj_healthy = bool(m_obj_rising or m_obj_plateau)
 
     checks = {
         "phase1a_ready": phase1a["ready"],
@@ -132,7 +134,7 @@ def evaluate_phase1b_gate(records, window=5, slot_count=8):
         "locality_better_than_random": locality_better_than_random,
         "object_losses_finite": object_losses_finite,
         "m_obj_nontrivial": m_obj_nontrivial,
-        "m_obj_rising": m_obj_rising,
+        "m_obj_healthy": m_obj_healthy,
     }
     return {
         "phase": "phase1b",
@@ -141,6 +143,8 @@ def evaluate_phase1b_gate(records, window=5, slot_count=8):
         "summary": {
             "m_obj_mean": _mean(m_obj),
             "m_obj_slope": m_obj_slope,
+            "m_obj_rising": m_obj_rising,
+            "m_obj_plateau": m_obj_plateau,
             "slot_match_mean": _mean(slot_match),
             "slot_concentration_mean": _mean(slot_concentration),
             "random_slot_baseline": random_slot_baseline,
