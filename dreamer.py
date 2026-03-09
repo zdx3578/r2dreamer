@@ -10,6 +10,7 @@ from torch.amp import GradScaler, autocast
 from torch.optim.lr_scheduler import LambdaLR
 
 import networks
+import phase1a
 import rssm
 import tools
 from networks import Projector
@@ -65,6 +66,16 @@ class Dreamer(nn.Module):
 
         self._loss_scales = dict(config.loss_scales)
         self._log_grads = bool(config.log_grads)
+        self.use_structured_readout = bool(getattr(config, "use_structured_readout", False))
+        self.use_effect_model = bool(getattr(config, "use_effect_model", False))
+        self.use_reachability_head = bool(getattr(config, "use_reachability_head", False))
+        self.use_goal_progress_head = bool(getattr(config, "use_goal_progress_head", False))
+        self.goal_horizon = int(getattr(getattr(config, "phase1a", {}), "goal_horizon", 3))
+
+        if self.use_effect_model and not self.use_structured_readout:
+            raise ValueError("Effect model requires use_structured_readout=True.")
+        if (self.use_reachability_head or self.use_goal_progress_head) and not self.use_structured_readout:
+            raise ValueError("Phase 1A heads require use_structured_readout=True.")
 
         modules = {
             "rssm": self.rssm,
@@ -122,6 +133,67 @@ class Dreamer(nn.Module):
                 "ema_encoder": self._ema_encoder,
                 "ema_obs_proj": self._ema_obs_proj,
             })
+
+        if self.use_structured_readout:
+            self.structured_readout = phase1a.StructuredReadout(
+                config.structured_readout,
+                self.rssm.feat_size,
+                config.act,
+                bool(config.norm),
+            )
+            modules.update({"structured_readout": self.structured_readout})
+            self._loss_scales.setdefault("struct_map", 1.0)
+            self._loss_scales.setdefault("struct_obj", 1.0)
+            self._loss_scales.setdefault("struct_global", 1.0)
+        if self.use_effect_model:
+            self.effect_model = phase1a.EffectModel(
+                config.effect_model,
+                self.rssm.feat_size,
+                self.act_dim,
+                self.structured_readout.rule_dim,
+                config.act,
+                bool(config.norm),
+            )
+            self.effect_heads = phase1a.EffectHeads(
+                config.effect_heads,
+                int(config.effect_model.latent_dim),
+                self.structured_readout.map_slots,
+                self.structured_readout.map_dim,
+                self.structured_readout.obj_slots,
+                self.structured_readout.obj_dim,
+                self.structured_readout.global_dim,
+                config.act,
+                bool(config.norm),
+            )
+            modules.update({
+                "effect_model": self.effect_model,
+                "effect_heads": self.effect_heads,
+            })
+            self._loss_scales.setdefault("delta_map", 1.0)
+            self._loss_scales.setdefault("delta_obj", 1.0)
+            self._loss_scales.setdefault("delta_global", 1.0)
+            self._loss_scales.setdefault("event", 1.0)
+        if self.use_reachability_head:
+            self.reachability_head = phase1a.ReachabilityHead(
+                config.reachability_head,
+                self.rssm.feat_size,
+                self.structured_readout.map_slots,
+                self.structured_readout.map_dim,
+                config.act,
+                bool(config.norm),
+            )
+            modules.update({"reachability_head": self.reachability_head})
+            self._loss_scales.setdefault("reach", 1.0)
+        if self.use_goal_progress_head:
+            self.goal_progress_head = phase1a.GoalProgressHead(
+                config.goal_progress_head,
+                self.rssm.feat_size,
+                self.structured_readout.global_dim,
+                config.act,
+                bool(config.norm),
+            )
+            modules.update({"goal_progress_head": self.goal_progress_head})
+            self._loss_scales.setdefault("goal", 1.0)
         # count number of parameters in each module
         for key, module in modules.items():
             if isinstance(module, nn.Parameter):
@@ -346,6 +418,107 @@ class Dreamer(nn.Module):
         replay_buffer.update(index, stoch.detach(), deter.detach())
         return metrics
 
+    def _phase1a_losses(self, feat, data, initial):
+        losses = {}
+        metrics = {}
+
+        initial_feat = self.rssm.get_feat(initial[0], initial[1]).unsqueeze(1)
+        feat_seq = torch.cat([initial_feat, feat], dim=1)
+        readouts = self.structured_readout(feat_seq)
+        current = {
+            "map_view": readouts["map_view"][:, :-1],
+            "obj_view": readouts["obj_view"][:, :-1],
+            "global_view": readouts["global_view"][:, :-1],
+            "rule_ctx": readouts["rule_ctx"][:, :-1],
+        }
+        nxt = {
+            "map_view": readouts["map_view"][:, 1:],
+            "obj_view": readouts["obj_view"][:, 1:],
+            "global_view": readouts["global_view"][:, 1:],
+            "rule_ctx": readouts["rule_ctx"][:, 1:],
+        }
+
+        feat_target = feat_seq.detach()
+        losses["struct_map"] = F.mse_loss(readouts["map_recon"], feat_target)
+        losses["struct_obj"] = F.mse_loss(readouts["obj_recon"], feat_target)
+        losses["struct_global"] = F.mse_loss(readouts["global_recon"], feat_target)
+
+        metrics["phase1a/map_std"] = readouts["map_view"].std()
+        metrics["phase1a/obj_std"] = readouts["obj_view"].std()
+        metrics["phase1a/global_std"] = readouts["global_view"].std()
+        metrics["phase1a/rule_std"] = readouts["rule_ctx"].std()
+
+        target_delta_global = (nxt["global_view"] - current["global_view"]).detach()
+        if self.use_effect_model:
+            target_delta_map = (nxt["map_view"] - current["map_view"]).detach()
+            target_delta_obj = (nxt["obj_view"] - current["obj_view"]).detach()
+            z_eff = self.effect_model(feat_seq[:, :-1], data["action"], current["rule_ctx"])
+            effect_out = self.effect_heads(z_eff)
+
+            losses["delta_map"] = F.smooth_l1_loss(effect_out["delta_map"], target_delta_map)
+            losses["delta_obj"] = F.smooth_l1_loss(effect_out["delta_obj"], target_delta_obj)
+            losses["delta_global"] = F.smooth_l1_loss(effect_out["delta_global"], target_delta_global)
+
+            delta_struct = (
+                target_delta_map.abs().mean(dim=(-2, -1))
+                + target_delta_obj.abs().mean(dim=(-2, -1))
+                + target_delta_global.abs().mean(dim=-1)
+            ).unsqueeze(-1)
+            threshold = delta_struct.mean().detach() + 0.5 * delta_struct.std(unbiased=False).detach()
+            explicit_event = to_f32(data["reward"]).abs().unsqueeze(-1) > 1e-6
+            structural_event = delta_struct > threshold
+            event_target = (explicit_event | data["is_terminal"].unsqueeze(-1) | structural_event).to(
+                effect_out["event_logits"].dtype
+            )
+            losses["event"] = F.binary_cross_entropy_with_logits(effect_out["event_logits"], event_target)
+
+            metrics["phase1a/delta_map_abs"] = target_delta_map.abs().mean()
+            metrics["phase1a/delta_obj_abs"] = target_delta_obj.abs().mean()
+            metrics["phase1a/delta_global_abs"] = target_delta_global.abs().mean()
+            metrics["phase1a/event_rate"] = event_target.mean()
+
+        feat_delta = (feat_seq[:, 1:] - feat_seq[:, :-1]).detach()
+        if self.use_reachability_head:
+            reach_pred = self.reachability_head(feat_seq[:, :-1], current["map_view"])
+            reach_target = torch.tanh(feat_delta.abs().mean(dim=-1, keepdim=True))
+            losses["reach"] = F.smooth_l1_loss(reach_pred, reach_target)
+            metrics["phase1a/reach_target"] = reach_target.mean()
+
+        if self.use_goal_progress_head:
+            goal_pred = self.goal_progress_head(feat_seq[:, :-1], current["global_view"])
+            goal_target = self._short_horizon_return(
+                to_f32(data["reward"]).unsqueeze(-1),
+                to_f32(data["is_terminal"]).unsqueeze(-1),
+                1 - 1 / self.horizon,
+                self.goal_horizon,
+            )
+            goal_target = torch.clamp(
+                torch.tanh(goal_target) + 0.25 * torch.tanh(target_delta_global.abs().mean(dim=-1, keepdim=True)),
+                -1.0,
+                1.0,
+            ).detach()
+            losses["goal"] = F.smooth_l1_loss(goal_pred, goal_target)
+            metrics["phase1a/goal_target"] = goal_target.mean()
+
+        return losses, metrics
+
+    def _short_horizon_return(self, reward, terminal, disc, horizon):
+        B, T, _ = reward.shape
+        target = torch.zeros_like(reward)
+        for t in range(T):
+            running = torch.zeros(B, 1, device=reward.device, dtype=reward.dtype)
+            live = torch.ones_like(running)
+            discount = 1.0
+            for k in range(int(horizon)):
+                idx = t + k
+                if idx >= T:
+                    break
+                running = running + discount * live * reward[:, idx]
+                live = live * (1.0 - terminal[:, idx])
+                discount *= disc
+            target[:, t] = running
+        return target
+
     def _cal_grad(self, data, initial):
         """Compute gradients for one batch.
 
@@ -427,12 +600,16 @@ class Dreamer(nn.Module):
             raise NotImplementedError
 
         # reward and continue
-        losses["rew"] = torch.mean(-self.reward(feat).log_prob(to_f32(data["reward"])))
-        cont = 1.0 - to_f32(data["is_terminal"])
+        losses["rew"] = torch.mean(-self.reward(feat).log_prob(to_f32(data["reward"]).unsqueeze(-1)))
+        cont = 1.0 - to_f32(data["is_terminal"]).unsqueeze(-1)
         losses["con"] = torch.mean(-self.cont(feat).log_prob(cont))
         # log
         metrics["dyn_entropy"] = torch.mean(self.rssm.get_dist(prior_logit).entropy())
         metrics["rep_entropy"] = torch.mean(self.rssm.get_dist(post_logit).entropy())
+        if self.use_structured_readout:
+            phase1a_losses, phase1a_metrics = self._phase1a_losses(feat, data, initial)
+            losses.update(phase1a_losses)
+            metrics.update(phase1a_metrics)
 
         # === Imagination rollout for actor-critic ===
         # (B*T, S, K), (B*T, D)
@@ -496,9 +673,9 @@ class Dreamer(nn.Module):
 
         # === Replay-based value learning (keep gradients through world model) ===
         last, term, reward = (
-            to_f32(data["is_last"]),
-            to_f32(data["is_terminal"]),
-            to_f32(data["reward"]),
+            to_f32(data["is_last"]).unsqueeze(-1),
+            to_f32(data["is_terminal"]).unsqueeze(-1),
+            to_f32(data["reward"]).unsqueeze(-1),
         )
         feat = self.rssm.get_feat(post_stoch, post_deter)
         boot = ret[:, 0].reshape(B, T, 1)

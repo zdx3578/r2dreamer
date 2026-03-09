@@ -7,6 +7,14 @@ compile: True
 log_grads: False
 device: ${device}
 rep_loss: "r2dreamer" # r2dreamer/dreamer/infonce/dreamerpro
+use_structured_readout: False
+use_effect_model: False
+use_goal_progress_head: False
+use_reachability_head: False
+use_objectification: False
+use_operator_bank: False
+use_event_pipeline: False
+use_sl_gate: False
 
 lr: 4e-5
 agc: 0.3
@@ -32,9 +40,48 @@ loss_scales:
   swav: 1.0
   temp: 1.0
   norm: 1.0
+  struct_map: 0.2
+  struct_obj: 0.2
+  struct_global: 0.2
+  delta_map: 1.0
+  delta_obj: 1.0
+  delta_global: 1.0
+  event: 0.5
+  reach: 0.25
+  goal: 0.25
 
 r2dreamer:
   lambd: 5e-4
+
+phase1a:
+  goal_horizon: 3
+
+structured_readout:
+  layers: 2
+  hidden: ${model.units}
+  map_slots: 16
+  map_dim: 32
+  obj_slots: 8
+  obj_dim: 32
+  global_dim: 64
+  rule_dim: 64
+
+effect_model:
+  layers: 2
+  hidden: ${model.units}
+  latent_dim: ${model.units}
+
+effect_heads:
+  layers: 1
+  hidden: ${model.units}
+
+reachability_head:
+  layers: 1
+  hidden: ${model.units}
+
+goal_progress_head:
+  layers: 1
+  hidden: ${model.units}
 
 dreamer_pro:
   warm_up: 1
