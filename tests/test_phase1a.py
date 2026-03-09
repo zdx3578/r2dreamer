@@ -104,6 +104,7 @@ def make_model_config(cnn_keys, mlp_keys, arc3_grid_keys="^$", use_objectificati
                 "sig_duration": 0.1,
                 "sig_impact": 0.1,
                 "rule_update": 0.1,
+                "rule_apply": 0.1,
             },
             "r2dreamer": {"lambd": 5e-4},
             "phase1a": {
@@ -121,7 +122,15 @@ def make_model_config(cnn_keys, mlp_keys, arc3_grid_keys="^$", use_objectificati
                 "goal_struct_scale": 0.5,
                 "goal_risk_scale": 0.5,
             },
-            "phase2": {"m_obj_threshold": 0.1, "match_margin_threshold": 0.02},
+            "phase2": {
+                "m_obj_threshold": 0.1,
+                "match_margin_threshold": 0.02,
+                "memory_write_operator_threshold": 0.14,
+                "memory_write_binding_threshold": 0.30,
+                "memory_retrieve_temperature": 1.0,
+                "memory_ema_decay": 0.99,
+                "use_memory_fusion": True,
+            },
             "rssm": {
                 "stoch": 4,
                 "deter": 64,
@@ -352,8 +361,7 @@ class Phase1ATest(unittest.TestCase):
         self.assertIn("loss/goal", metrics)
         self.assertIn("phase1a/map_std", metrics)
         self.assertIn("phase1a/slot_carry_confidence", metrics)
-        self.assertIn("phase1a/event_threshold", metrics)
-        self.assertIn("phase1a/event_score", metrics)
+        self.assertIn("phase1a/event_rate", metrics)
         self.assertIn("replay/priority_mean", metrics)
         if use_objectification:
             self.assertIn("loss/obj_stable", metrics)
@@ -368,8 +376,14 @@ class Phase1ATest(unittest.TestCase):
             self.assertIn("phase1b/obj_stable_scale", metrics)
         if use_phase2:
             self.assertIn("loss/op_assign", metrics)
+            self.assertIn("loss/rule_apply", metrics)
             self.assertIn("phase2/operator_entropy", metrics)
             self.assertIn("phase2/match_gate_scale", metrics)
+            self.assertIn("phase2/operator_top1_conf", metrics)
+            self.assertIn("phase2/binding_top1_conf", metrics)
+            self.assertIn("phase2/memory_conf", metrics)
+            self.assertIn("phase2/rule_apply_error", metrics)
+            self.assertIn("phase2/rule_memory_write_rate", metrics)
         self.assertEqual(replay.updated[0].shape[:2], first_obs.shape[:2])
         self.assertEqual(replay.updated[1].shape[:2], first_obs.shape[:2])
         self.assertIsNotNone(replay.updated_priority)

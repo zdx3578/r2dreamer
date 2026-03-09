@@ -245,6 +245,69 @@ def evaluate_phase2_gate(records, window=5, slot_count=8):
     }
 
 
+def evaluate_phase2_executable_gate(records, window=5, slot_count=8):
+    phase2 = evaluate_phase2_gate(records, window=window, slot_count=slot_count)
+    required = [
+        "train/loss/rule_apply",
+        "train/phase2/operator_top1_conf",
+        "train/phase2/binding_top1_conf",
+        "train/phase2/memory_conf",
+        "train/phase2/retrieval_agreement",
+        "train/phase2/rule_apply_error",
+        "train/phase2/rule_memory_usage",
+        "train/phase2/rule_memory_write_rate",
+    ]
+    has_required = _finite_required(records, required)
+    operator_conf = _recent_values(records, "train/phase2/operator_top1_conf", window)
+    binding_conf = _recent_values(records, "train/phase2/binding_top1_conf", window)
+    memory_conf = _recent_values(records, "train/phase2/memory_conf", window)
+    retrieval_agreement = _recent_values(records, "train/phase2/retrieval_agreement", window)
+    rule_apply_error = _recent_values(records, "train/phase2/rule_apply_error", window)
+    rule_memory_usage = _recent_values(records, "train/phase2/rule_memory_usage", window)
+    rule_memory_entropy = _recent_values(records, "train/phase2/rule_memory_entropy", window)
+    rule_memory_write_rate = _recent_values(records, "train/phase2/rule_memory_write_rate", window)
+    fused_delta_rule_abs = _recent_values(records, "train/phase2/fused_delta_rule_abs", window)
+
+    operator_confident = bool(operator_conf and _mean(operator_conf) > 0.25)
+    binding_confident = bool(binding_conf and _mean(binding_conf) > 0.22)
+    memory_populated = bool(rule_memory_usage and _mean(rule_memory_usage) > 0.0)
+    memory_writing = bool(rule_memory_write_rate and _mean(rule_memory_write_rate) > 0.0)
+    retrieval_confident = bool(memory_conf and _mean(memory_conf) > 0.05)
+    retrieval_agreement_nontrivial = bool(retrieval_agreement and _mean(retrieval_agreement) > 0.55)
+    rule_apply_stable = bool(rule_apply_error and _mean(rule_apply_error) < 0.25)
+    fused_rule_nontrivial = bool(fused_delta_rule_abs and _mean(fused_delta_rule_abs) > 1e-4)
+
+    checks = {
+        "phase2_ready": phase2["ready"],
+        "has_required_metrics": has_required,
+        "operator_confident": operator_confident,
+        "binding_confident": binding_confident,
+        "memory_populated": memory_populated,
+        "memory_writing": memory_writing or memory_populated,
+        "retrieval_confident": retrieval_confident,
+        "retrieval_agreement_nontrivial": retrieval_agreement_nontrivial,
+        "rule_apply_stable": rule_apply_stable,
+        "fused_rule_nontrivial": fused_rule_nontrivial,
+    }
+    return {
+        "phase": "phase2_executable",
+        "ready": all(checks.values()),
+        "checks": checks,
+        "summary": {
+            "operator_top1_conf_mean": _mean(operator_conf),
+            "binding_top1_conf_mean": _mean(binding_conf),
+            "memory_conf_mean": _mean(memory_conf),
+            "retrieval_agreement_mean": _mean(retrieval_agreement),
+            "rule_apply_error_mean": _mean(rule_apply_error),
+            "rule_memory_usage_mean": _mean(rule_memory_usage),
+            "rule_memory_entropy_mean": _mean(rule_memory_entropy),
+            "rule_memory_write_rate_mean": _mean(rule_memory_write_rate),
+            "fused_delta_rule_abs_mean": _mean(fused_delta_rule_abs),
+        },
+        "phase2": phase2,
+    }
+
+
 def evaluate_atari_task_gate(records, window=10, score_window=20):
     required = ["train/ret"]
     has_required = _finite_required(records, required)

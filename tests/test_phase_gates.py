@@ -6,6 +6,7 @@ from utils.phase_gates import (
     evaluate_atari_task_gate,
     evaluate_phase1a_gate,
     evaluate_phase1b_gate,
+    evaluate_phase2_executable_gate,
     evaluate_phase2_gate,
     load_metrics_records,
 )
@@ -258,6 +259,118 @@ class PhaseGateTest(unittest.TestCase):
         ]
         result = evaluate_phase2_gate(records, slot_count=8)
         self.assertTrue(result["ready"])
+
+    def test_phase2_executable_gate_requires_memory_and_apply_path(self):
+        records = [
+            {
+                "train/loss/delta_map": 0.4,
+                "train/loss/delta_obj": 0.5,
+                "train/loss/delta_global": 0.3,
+                "train/loss/event": 0.7,
+                "train/phase1a/map_std": 0.7,
+                "train/phase1a/obj_std": 0.9,
+                "train/phase1a/delta_map_abs": 0.03,
+                "train/phase1a/delta_obj_abs": 0.01,
+                "train/opt/loss": 25.0,
+                "train/loss/obj_stable": 0.4,
+                "train/loss/obj_local": 0.1,
+                "train/loss/obj_rel": 2.2,
+                "train/phase1b/m_obj": 0.38,
+                "train/phase1b/slot_match": 0.51,
+                "train/phase1b/slot_match_random": 0.509,
+                "train/phase1b/slot_match_margin": 0.001,
+                "train/phase1b/slot_cycle": 0.94,
+                "train/phase1b/slot_identity": 0.56,
+                "train/phase1b/slot_concentration": 0.97,
+                "train/phase1b/object_interface": 0.62,
+                "train/phase1b/motif_entropy": 0.9,
+                "train/loss/op_assign": 0.4,
+                "train/loss/op_proto": 0.3,
+                "train/loss/op_reuse": 0.2,
+                "train/loss/bind_ce": 0.2,
+                "train/loss/bind_consistency": 0.0,
+                "train/loss/sig_scope": 0.0,
+                "train/loss/sig_duration": 0.0,
+                "train/loss/sig_impact": 0.0,
+                "train/loss/rule_update": 0.02,
+                "train/loss/rule_apply": 0.05,
+                "train/phase2/operator_entropy": 1.0,
+                "train/phase2/operator_usage_entropy": 1.0,
+                "train/phase2/binding_entropy": 0.46,
+                "train/phase2/signature_std": 0.27,
+                "train/phase2/rule_delta_abs": 0.01,
+                "train/phase2/gate_scale": 0.22,
+                "train/phase2/match_gate_scale": 1.0,
+                "train/phase2/operator_top1_conf": 0.55,
+                "train/phase2/binding_top1_conf": 0.31,
+                "train/phase2/memory_conf": 0.22,
+                "train/phase2/retrieval_agreement": 0.71,
+                "train/phase2/rule_apply_error": 0.11,
+                "train/phase2/rule_memory_usage": 0.15,
+                "train/phase2/rule_memory_entropy": 0.28,
+                "train/phase2/rule_memory_write_rate": 0.08,
+                "train/phase2/fused_delta_rule_abs": 0.09,
+            }
+            for _ in range(5)
+        ]
+        result = evaluate_phase2_executable_gate(records, slot_count=8)
+        self.assertTrue(result["ready"])
+
+    def test_phase2_executable_gate_rejects_empty_memory_path(self):
+        records = [
+            {
+                "train/loss/delta_map": 0.4,
+                "train/loss/delta_obj": 0.5,
+                "train/loss/delta_global": 0.3,
+                "train/loss/event": 0.7,
+                "train/phase1a/map_std": 0.7,
+                "train/phase1a/obj_std": 0.9,
+                "train/phase1a/delta_map_abs": 0.03,
+                "train/phase1a/delta_obj_abs": 0.01,
+                "train/opt/loss": 25.0,
+                "train/loss/obj_stable": 0.4,
+                "train/loss/obj_local": 0.1,
+                "train/loss/obj_rel": 2.2,
+                "train/phase1b/m_obj": 0.38,
+                "train/phase1b/slot_match": 0.51,
+                "train/phase1b/slot_match_random": 0.509,
+                "train/phase1b/slot_match_margin": 0.001,
+                "train/phase1b/slot_cycle": 0.94,
+                "train/phase1b/slot_identity": 0.56,
+                "train/phase1b/slot_concentration": 0.97,
+                "train/phase1b/object_interface": 0.62,
+                "train/phase1b/motif_entropy": 0.9,
+                "train/loss/op_assign": 0.4,
+                "train/loss/op_proto": 0.3,
+                "train/loss/op_reuse": 0.2,
+                "train/loss/bind_ce": 0.2,
+                "train/loss/bind_consistency": 0.0,
+                "train/loss/sig_scope": 0.0,
+                "train/loss/sig_duration": 0.0,
+                "train/loss/sig_impact": 0.0,
+                "train/loss/rule_update": 0.02,
+                "train/loss/rule_apply": 0.05,
+                "train/phase2/operator_entropy": 1.0,
+                "train/phase2/operator_usage_entropy": 1.0,
+                "train/phase2/binding_entropy": 0.46,
+                "train/phase2/signature_std": 0.27,
+                "train/phase2/rule_delta_abs": 0.01,
+                "train/phase2/gate_scale": 0.22,
+                "train/phase2/match_gate_scale": 1.0,
+                "train/phase2/operator_top1_conf": 0.55,
+                "train/phase2/binding_top1_conf": 0.31,
+                "train/phase2/memory_conf": 0.0,
+                "train/phase2/retrieval_agreement": 0.5,
+                "train/phase2/rule_apply_error": 0.11,
+                "train/phase2/rule_memory_usage": 0.0,
+                "train/phase2/rule_memory_entropy": 0.0,
+                "train/phase2/rule_memory_write_rate": 0.0,
+                "train/phase2/fused_delta_rule_abs": 0.09,
+            }
+            for _ in range(5)
+        ]
+        result = evaluate_phase2_executable_gate(records, slot_count=8)
+        self.assertFalse(result["ready"])
 
     def test_atari_task_gate_requires_task_signal(self):
         records = [

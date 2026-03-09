@@ -13,8 +13,11 @@ import networks
 import binding_head
 import objectification
 import operator_bank
+import phase2_artifact
 import phase1a
 import rssm
+import rule_apply
+import rule_memory
 import rule_update
 import signature_head
 import tools
@@ -82,8 +85,16 @@ class Dreamer(nn.Module):
         self.use_rule_update = bool(getattr(config, "use_rule_update", False))
         phase1a_cfg = getattr(config, "phase1a", {})
         self.goal_horizon = int(getattr(phase1a_cfg, "goal_horizon", 3))
-        self.phase2_m_obj_threshold = float(getattr(getattr(config, "phase2", {}), "m_obj_threshold", 0.2))
-        self.phase2_warmup_updates = int(getattr(getattr(config, "phase2", {}), "warmup_updates", 0))
+        phase2_cfg = getattr(config, "phase2", {})
+        self.phase2_m_obj_threshold = float(getattr(phase2_cfg, "m_obj_threshold", 0.2))
+        self.phase2_warmup_updates = int(getattr(phase2_cfg, "warmup_updates", 0))
+        legacy_write_threshold = getattr(phase2_cfg, "memory_write_threshold", None)
+        self.phase2_memory_operator_threshold = float(
+            getattr(phase2_cfg, "memory_write_operator_threshold", 0.14 if legacy_write_threshold is None else legacy_write_threshold)
+        )
+        self.phase2_memory_binding_threshold = float(
+            getattr(phase2_cfg, "memory_write_binding_threshold", 0.30 if legacy_write_threshold is None else legacy_write_threshold)
+        )
         objectification_cfg = getattr(config, "objectification", None)
         self.phase1b_curriculum_updates = int(getattr(objectification_cfg, "curriculum_updates", 0))
         self.phase1b_early_loss_scales = {
@@ -290,6 +301,16 @@ class Dreamer(nn.Module):
             )
             modules.update({"rule_update_head": self.rule_update_head})
             self._loss_scales.setdefault("rule_update", 1.0)
+            self.rule_memory = rule_memory.RuleMemory(
+                config.phase2,
+                int(config.operator_bank.num_operators),
+                int(config.binding_head.num_bindings),
+                3,
+                self.structured_readout.rule_dim,
+            )
+            self.rule_apply = rule_apply.RuleApply(config.phase2)
+            modules.update({"rule_memory": self.rule_memory, "rule_apply": self.rule_apply})
+            self._loss_scales.setdefault("rule_apply", 1.0)
         # count number of parameters in each module
         for key, module in modules.items():
             if isinstance(module, nn.Parameter):
@@ -801,7 +822,7 @@ class Dreamer(nn.Module):
         impact_target = torch.tanh(reward_mass + global_mass + rule_mass)
         return scope_target, duration_target, impact_target
 
-    def _phase2_losses(self, structured, data):
+    def _phase2_forward(self, structured, data):
         op_out = self.operator_bank(
             structured["feat_seq"][:, :-1],
             data["action"],
@@ -814,64 +835,149 @@ class Dreamer(nn.Module):
         bind_out = self.binding_head(op_out["operator_embed"], op_out["context_embed"])
         sig_out = self.signature_head(op_out["operator_embed"], op_out["context_embed"])
         rule_out = self.rule_update_head(structured["z_eff"], op_out["operator_embed"], bind_out["q_b"], sig_out["q_sigma"])
-
+        memory_out = self.rule_memory.retrieve(op_out["q_u"], bind_out["q_b"], sig_out["q_sigma"])
         gate, object_gate, match_gate, warmup_gate = self._phase2_gate(structured["objectification_out"])
-        flat_q = op_out["q_u"].reshape(-1, op_out["q_u"].shape[-1])
-        flat_eff = op_out["effect_embed"].reshape(-1, op_out["effect_embed"].shape[-1])
-        flat_binding = bind_out["q_b"].reshape(-1, bind_out["q_b"].shape[-1])
+        operator_conf, operator_id = op_out["q_u"].max(dim=-1)
+        binding_conf, binding_id = bind_out["q_b"].max(dim=-1)
+        apply_out = self.rule_apply(
+            structured["current"]["rho_t"],
+            rule_out["delta_rule"],
+            memory_out["memory_delta_rule"],
+            operator_conf.unsqueeze(-1),
+            binding_conf.unsqueeze(-1),
+            memory_out["memory_conf"],
+            gate,
+        )
+        return phase2_artifact.Phase2Artifact(
+            q_u=op_out["q_u"],
+            target_q=op_out["target_q"],
+            operator_id=operator_id,
+            operator_conf=operator_conf.unsqueeze(-1),
+            operator_embed=op_out["operator_embed"],
+            context_embed=op_out["context_embed"],
+            effect_embed=op_out["effect_embed"],
+            operator_usage=op_out["avg_usage"],
+            operator_sample_entropy=op_out["sample_entropy"],
+            operator_usage_entropy=op_out["usage_entropy"],
+            q_b=bind_out["q_b"],
+            binding_id=binding_id,
+            binding_conf=binding_conf.unsqueeze(-1),
+            q_sigma=sig_out["q_sigma"],
+            scope=sig_out["scope"],
+            duration=sig_out["duration"],
+            impact=sig_out["impact"],
+            delta_rule_pred=rule_out["delta_rule"],
+            memory_delta_rule=memory_out["memory_delta_rule"],
+            memory_signature_proto=memory_out["memory_signature_proto"],
+            memory_conf=memory_out["memory_conf"],
+            memory_weights=memory_out["memory_weights"],
+            delta_rule_fused=apply_out["delta_rule_fused"],
+            rho_next_pred=apply_out["rho_next_pred"],
+            fusion_alpha=apply_out["alpha"],
+            gate=gate,
+            object_gate=object_gate,
+            match_gate=match_gate,
+            warmup_gate=warmup_gate,
+        )
 
-        op_assign = -(op_out["target_q"].detach() * torch.log(op_out["q_u"] + 1e-6)).sum(dim=-1).mean()
+    def _phase2_losses(self, artifact, structured):
+        flat_q = artifact.q_u.reshape(-1, artifact.q_u.shape[-1])
+        flat_eff = artifact.effect_embed.reshape(-1, artifact.effect_embed.shape[-1])
+        flat_binding = artifact.q_b.reshape(-1, artifact.q_b.shape[-1])
+
+        op_assign = -(artifact.target_q.detach() * torch.log(artifact.q_u + 1e-6)).sum(dim=-1).mean()
         if flat_q.shape[0] > 1:
             eff_sim = torch.matmul(flat_eff, flat_eff.transpose(0, 1))
             op_sim = torch.matmul(flat_q, flat_q.transpose(0, 1))
             op_proto = F.smooth_l1_loss(op_sim, eff_sim.detach())
         else:
             op_proto = torch.zeros_like(op_assign)
-        uniform = torch.full_like(op_out["avg_usage"], 1.0 / op_out["avg_usage"].numel())
-        op_reuse = (op_out["avg_usage"] * (torch.log(op_out["avg_usage"] + 1e-6) - torch.log(uniform))).sum()
+        uniform = torch.full_like(artifact.operator_usage, 1.0 / artifact.operator_usage.numel())
+        op_reuse = (artifact.operator_usage * (torch.log(artifact.operator_usage + 1e-6) - torch.log(uniform))).sum()
 
         binding_target = self._binding_proxy(structured)
-        bind_ce = -(binding_target.detach() * torch.log(bind_out["q_b"] + 1e-6)).sum(dim=-1).mean()
+        bind_ce = -(binding_target.detach() * torch.log(artifact.q_b + 1e-6)).sum(dim=-1).mean()
         operator_binding = torch.matmul(flat_q.transpose(0, 1), flat_binding) / flat_q.sum(dim=0, keepdim=True).transpose(0, 1).clamp_min(1e-6)
-        bind_expected = torch.matmul(flat_q, operator_binding.detach()).reshape_as(bind_out["q_b"])
-        bind_consistency = F.smooth_l1_loss(bind_out["q_b"], bind_expected)
+        bind_expected = torch.matmul(flat_q, operator_binding.detach()).reshape_as(artifact.q_b)
+        bind_consistency = F.smooth_l1_loss(artifact.q_b, bind_expected)
 
         scope_target, duration_target, impact_target = self._signature_proxy(structured)
-        sig_scope = F.smooth_l1_loss(sig_out["scope"], scope_target)
-        sig_duration = F.smooth_l1_loss(sig_out["duration"], duration_target)
-        sig_impact = F.smooth_l1_loss(sig_out["impact"], impact_target)
+        sig_scope = F.smooth_l1_loss(artifact.scope, scope_target)
+        sig_duration = F.smooth_l1_loss(artifact.duration, duration_target)
+        sig_impact = F.smooth_l1_loss(artifact.impact, impact_target)
         rule_update_loss = self._weighted_loss(
-            rule_out["delta_rule"], structured["target_delta_rho"], structured["transition_valid_ratio"], kind="smooth_l1"
+            artifact.delta_rule_pred, structured["target_delta_rho"], structured["transition_valid_ratio"], kind="smooth_l1"
+        )
+        rule_apply_loss = self._weighted_loss(
+            artifact.rho_next_pred, structured["nxt"]["rho_t"], structured["transition_valid_ratio"], kind="smooth_l1"
         )
 
         losses = {
-            "op_assign": gate * op_assign,
-            "op_proto": gate * op_proto,
-            "op_reuse": gate * op_reuse,
-            "bind_ce": gate * bind_ce,
-            "bind_consistency": gate * bind_consistency,
-            "sig_scope": gate * sig_scope,
-            "sig_duration": gate * sig_duration,
-            "sig_impact": gate * sig_impact,
-            "rule_update": gate * rule_update_loss,
+            "op_assign": artifact.gate * op_assign,
+            "op_proto": artifact.gate * op_proto,
+            "op_reuse": artifact.gate * op_reuse,
+            "bind_ce": artifact.gate * bind_ce,
+            "bind_consistency": artifact.gate * bind_consistency,
+            "sig_scope": artifact.gate * sig_scope,
+            "sig_duration": artifact.gate * sig_duration,
+            "sig_impact": artifact.gate * sig_impact,
+            "rule_update": artifact.gate * rule_update_loss,
+            "rule_apply": artifact.gate * rule_apply_loss,
         }
+        retrieval_agreement = F.cosine_similarity(
+            artifact.delta_rule_pred.reshape(-1, artifact.delta_rule_pred.shape[-1]),
+            artifact.memory_delta_rule.reshape(-1, artifact.memory_delta_rule.shape[-1]) + 1e-6,
+            dim=-1,
+        )
+        retrieval_agreement = 0.5 * (1.0 + retrieval_agreement).mean()
         metrics = {
-            "phase2/gate_scale": gate,
-            "phase2/object_gate_scale": object_gate,
-            "phase2/match_gate_scale": match_gate,
-            "phase2/warmup_scale": warmup_gate,
-            "phase2/operator_entropy": op_out["sample_entropy"],
-            "phase2/operator_usage_entropy": op_out["usage_entropy"],
-            "phase2/operator_usage_max": op_out["avg_usage"].max(),
-            "phase2/binding_entropy": bind_out["entropy"],
-            "phase2/binding_max": bind_out["q_b"].max(dim=-1).values.mean(),
-            "phase2/signature_scope": sig_out["scope"].mean(),
-            "phase2/signature_duration": sig_out["duration"].mean(),
-            "phase2/signature_impact": sig_out["impact"].mean(),
-            "phase2/signature_std": sig_out["q_sigma"].std(),
+            "phase2/gate_scale": artifact.gate,
+            "phase2/object_gate_scale": artifact.object_gate,
+            "phase2/match_gate_scale": artifact.match_gate,
+            "phase2/warmup_scale": artifact.warmup_gate,
+            "phase2/operator_entropy": artifact.operator_sample_entropy,
+            "phase2/operator_usage_entropy": artifact.operator_usage_entropy,
+            "phase2/operator_usage_max": artifact.operator_usage.max(),
+            "phase2/operator_top1_conf": artifact.operator_conf.mean(),
+            "phase2/binding_entropy": -(artifact.q_b * torch.log(artifact.q_b + 1e-6)).sum(dim=-1).mean()
+            / math.log(artifact.q_b.shape[-1]),
+            "phase2/binding_max": artifact.q_b.max(dim=-1).values.mean(),
+            "phase2/binding_top1_conf": artifact.binding_conf.mean(),
+            "phase2/signature_scope": artifact.scope.mean(),
+            "phase2/signature_duration": artifact.duration.mean(),
+            "phase2/signature_impact": artifact.impact.mean(),
+            "phase2/signature_std": artifact.q_sigma.std(),
             "phase2/rule_delta_abs": (structured["target_delta_rho"].abs() * structured["transition_valid_ratio"]).mean(),
+            "phase2/memory_conf": artifact.memory_conf.mean(),
+            "phase2/retrieval_agreement": retrieval_agreement,
+            "phase2/rule_apply_error": rule_apply_loss.detach(),
+            "phase2/pred_delta_rule_abs": artifact.delta_rule_pred.abs().mean(),
+            "phase2/retrieved_delta_rule_abs": artifact.memory_delta_rule.abs().mean(),
+            "phase2/fused_delta_rule_abs": artifact.delta_rule_fused.abs().mean(),
         }
         return losses, metrics
+
+    def _phase2_memory_update(self, artifact, structured):
+        event_mask = structured["event_target"] > 0.5
+        conf_mask = (artifact.operator_conf >= self.phase2_memory_operator_threshold) & (
+            artifact.binding_conf >= self.phase2_memory_binding_threshold
+        )
+        valid_mask = structured["transition_valid_ratio"] > 0
+        gate_mask = artifact.gate.detach() > 0
+        write_mask = event_mask & conf_mask & valid_mask & gate_mask
+        with torch.no_grad():
+            stats = self.rule_memory.update(
+                artifact.q_u.detach(),
+                artifact.q_b.detach(),
+                artifact.q_sigma.detach(),
+                structured["target_delta_rho"].detach(),
+                write_mask.detach(),
+            )
+        return {
+            "phase2/rule_memory_write_rate": stats["write_rate"],
+            "phase2/rule_memory_usage": stats["usage_fraction"],
+            "phase2/rule_memory_entropy": stats["usage_entropy"],
+        }
 
     def _short_horizon_return(self, reward, terminal, disc, horizon):
         B, T, _ = reward.shape
@@ -993,9 +1099,11 @@ class Dreamer(nn.Module):
                 metrics.update(object_metrics)
                 structured["objectification_out"] = object_out
             if self.use_operator_bank:
-                phase2_losses, phase2_metrics = self._phase2_losses(structured, data)
+                phase2_art = self._phase2_forward(structured, data)
+                phase2_losses, phase2_metrics = self._phase2_losses(phase2_art, structured)
                 losses.update(phase2_losses)
                 metrics.update(phase2_metrics)
+                metrics.update(self._phase2_memory_update(phase2_art, structured))
             replay_priority = self._replay_priorities(structured)
             if replay_priority is not None:
                 metrics["replay/priority_mean"] = replay_priority.mean()
