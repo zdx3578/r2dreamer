@@ -10,6 +10,3 @@ model:
   use_binding_head: True
   use_signature_head: True
   use_rule_update: True
-
-buffer:
-  prioritized: True

@@ -67,9 +67,6 @@ class StructuredReadout(nn.Module):
         self.spatial_shape = tuple(spatial_shape) if spatial_shape is not None else None
         self.query_track_blend = float(getattr(config, "query_track_blend", 0.5))
         self.query_track_stopgrad = bool(getattr(config, "query_track_stopgrad", True))
-        self.query_conf_threshold = float(getattr(config, "query_conf_threshold", 0.15))
-        self.query_conf_sharpness = float(getattr(config, "query_conf_sharpness", 8.0))
-
         self.trunk, out_dim = _build_mlp(feat_dim, int(config.hidden), int(config.layers), act_name, use_norm)
         if self.spatial_shape is None:
             self.map_head = nn.Linear(out_dim, self.map_slots * self.map_dim, bias=True)
@@ -100,19 +97,14 @@ class StructuredReadout(nn.Module):
         if self.spatial_shape is not None:
             nn.init.normal_(self.slot_queries, std=0.02)
 
-    def _dynamic_slot_queries(self, prev_slots, prev_confidence, dtype):
+    def _dynamic_slot_queries(self, prev_slots, dtype):
         static_queries = self.slot_queries.to(dtype).unsqueeze(0)
         if prev_slots is None:
             return static_queries
         tracked_slots = prev_slots.detach() if self.query_track_stopgrad else prev_slots
         tracked_queries = self.prev_obj_proj(tracked_slots)
         blend = max(0.0, min(1.0, self.query_track_blend))
-        if prev_confidence is None:
-            carry_gate = tracked_queries.new_ones(tracked_queries.shape[:-1] + (1,))
-        else:
-            carry_gate = torch.sigmoid((prev_confidence.to(dtype) - self.query_conf_threshold) * self.query_conf_sharpness)
-        carry_blend = blend * carry_gate
-        return (1.0 - carry_blend) * static_queries + carry_blend * tracked_queries
+        return (1.0 - blend) * static_queries + blend * tracked_queries
 
     def _readout_from_spatial(self, hidden, spatial_hidden, spatial_mask):
         single_step = hidden.dim() == 2
@@ -132,7 +124,6 @@ class StructuredReadout(nn.Module):
         globals_ = []
         rules = []
         prev_slots = None
-        prev_confidence = None
         carry_confidences = []
 
         for index in range(steps):
@@ -149,7 +140,7 @@ class StructuredReadout(nn.Module):
             map_tokens = map_tokens + self.map_context(hidden_t).reshape(hidden_t.shape[0], self.map_slots, -1)
             map_out = torch.tanh(self.map_head(map_tokens))
 
-            slot_queries = self._dynamic_slot_queries(prev_slots, prev_confidence, token_feat.dtype)
+            slot_queries = self._dynamic_slot_queries(prev_slots, token_feat.dtype)
             attn_logits = torch.einsum("bnd,bsd->bsn", token_feat, slot_queries)
             attn_logits = attn_logits / math.sqrt(float(token_feat.shape[-1]))
             attn = torch.softmax(attn_logits, dim=-1) * token_weight.squeeze(-1).unsqueeze(-2)
@@ -170,7 +161,6 @@ class StructuredReadout(nn.Module):
             globals_.append(global_out)
             rules.append(rule_out)
             prev_slots = obj_out
-            prev_confidence = carry_confidence
             carry_confidences.append(carry_confidence)
 
         M_t = torch.stack(maps, dim=1).reshape(*batch_shape, steps, self.map_slots, self.map_dim)

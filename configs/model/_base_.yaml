@@ -70,18 +70,6 @@ r2dreamer:
 
 phase1a:
   goal_horizon: 3
-  reach_horizon: 4
-  event_ema_decay: 0.99
-  event_threshold_scale: 1.0
-  event_target_sharpness: 6.0
-  event_target_floor: 0.05
-  struct_recon_scale: 0.35
-  struct_smooth_scale: 0.50
-  struct_sparse_scale: 0.25
-  struct_event_scale: 0.25
-  goal_event_scale: 0.50
-  goal_struct_scale: 0.50
-  goal_risk_scale: 0.50
 
 phase2:
   m_obj_threshold: 0.2
@@ -99,8 +87,6 @@ structured_readout:
   rule_dim: 64
   query_track_blend: 0.5
   query_track_stopgrad: True
-  query_conf_threshold: 0.15
-  query_conf_sharpness: 8.0
 
 effect_model:
   layers: 2
@@ -127,17 +113,17 @@ objectification:
   identity_temperature: 0.25
   ema_decay: 0.99
   sinkhorn_iters: 10
-  curriculum_updates: 10000
-  obj_stable_early: 0.50
-  obj_local_early: 0.15
-  obj_rel_early: 0.10
+  curriculum_updates: 0
+  obj_stable_early: 0.25
+  obj_local_early: 0.25
+  obj_rel_early: 0.25
   w_match: 1.0
   w_temp: 1.0
   w_smooth: 0.5
   w_cycle: 0.5
   w_contrast: 0.5
-  w_teacher: 0.5
-  w_multistep: 0.5
+  w_teacher: 0.0
+  w_multistep: 0.0
   multistep_offset: 2
   w_sparse: 1.0
   w_conc: 1.0
