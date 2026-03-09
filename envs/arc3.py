@@ -303,6 +303,7 @@ class Arc3Grid(gym.Env):
         self._observation_space = gym.spaces.Dict(
             {
                 "grid": grid_space,
+                "valid_mask": gym.spaces.Box(0.0, 1.0, self._size + (1,), dtype=np.float32),
                 "state_flags": gym.spaces.Box(0.0, 1.0, (4,), dtype=np.float32),
                 "progress": gym.spaces.Box(-np.inf, np.inf, (8,), dtype=np.float32),
                 "action_context": gym.spaces.Box(-np.inf, np.inf, (8,), dtype=np.float32),
@@ -458,6 +459,7 @@ class Arc3Grid(gym.Env):
                 self._grid_encoding,
                 num_special_tokens=self._num_special_tokens,
             ),
+            "valid_mask": transition.valid_mask[..., None].astype(np.float32),
             "state_flags": encode_arc_state_flags(transition.state_name),
             "progress": encode_arc_progress(
                 levels_completed=transition.levels_completed,

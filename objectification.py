@@ -39,11 +39,12 @@ class ObjectificationModule(nn.Module):
         self.register_buffer("running_obj_losses", torch.ones(3, dtype=torch.float32))
         self.apply(tools.weight_init_)
 
-    def forward(self, obj_view, next_obj_view, z_eff, delta_obj_pred, event_target):
-        pred_next = obj_view + delta_obj_pred
-        stable = self._stable_losses(obj_view, next_obj_view, pred_next, event_target)
-        local = self._local_losses(next_obj_view - obj_view, delta_obj_pred)
-        rel = self._relational_losses(obj_view, next_obj_view, pred_next, z_eff, local["target_slot_prob"])
+    def forward(self, O_t, next_O_t, z_eff, delta_O_pred, event_target, obj_mask=None):
+        slot_weight = None if obj_mask is None else obj_mask.squeeze(-1).clamp_min(0.0)
+        pred_next = O_t + delta_O_pred
+        stable = self._stable_losses(O_t, next_O_t, pred_next, event_target, slot_weight)
+        local = self._local_losses(next_O_t - O_t, delta_O_pred, slot_weight)
+        rel = self._relational_losses(O_t, next_O_t, pred_next, z_eff, local["target_slot_prob"], slot_weight)
 
         loss_obj_stable = self.w_match * stable["loss_match"] + self.w_temp * stable["loss_temp"] + self.w_smooth * stable["loss_smooth"]
         loss_obj_local = self.w_sparse * local["loss_sparse"] + self.w_conc * local["loss_conc"] + self.w_cf * local["loss_cf"]
@@ -60,18 +61,34 @@ class ObjectificationModule(nn.Module):
             "motif_usage_entropy": rel["motif_usage_entropy"],
         }
 
-    def _stable_losses(self, obj_view, next_obj_view, pred_next, event_target):
-        current = F.normalize(self.slot_proj(obj_view), dim=-1)
-        nxt = F.normalize(self.slot_proj(next_obj_view), dim=-1)
+    def _weighted_mean(self, value, weight):
+        if weight is None:
+            return value.mean()
+        weight = weight.to(value.dtype)
+        while weight.dim() < value.dim():
+            weight = weight.unsqueeze(-1)
+        weight = torch.broadcast_to(weight, value.shape)
+        numer = (value * weight).sum()
+        denom = weight.sum().clamp_min(1e-6)
+        return numer / denom
+
+    def _stable_losses(self, O_t, next_O_t, pred_next, event_target, slot_weight):
+        current = F.normalize(self.slot_proj(O_t), dim=-1)
+        nxt = F.normalize(self.slot_proj(next_O_t), dim=-1)
         match = soft_slot_alignment(current, nxt, self.temperature)
-        aligned_next = align_slots(match, next_obj_view)
+        aligned_next = align_slots(match, next_O_t)
 
-        loss_match = F.smooth_l1_loss(pred_next, aligned_next)
-        loss_temp = 1.0 - F.cosine_similarity(pred_next, aligned_next, dim=-1).mean()
+        match_err = F.smooth_l1_loss(pred_next, aligned_next, reduction="none").mean(dim=-1)
+        temp_err = 1.0 - F.cosine_similarity(pred_next, aligned_next, dim=-1)
+        loss_match = self._weighted_mean(match_err, slot_weight)
+        loss_temp = self._weighted_mean(temp_err, slot_weight)
 
-        non_event = 1.0 - event_target.to(obj_view.dtype).squeeze(-1)
-        smooth = (obj_view - aligned_next).pow(2).mean(dim=-1)
-        loss_smooth = (smooth * non_event.unsqueeze(-1)).sum() / (non_event.sum() * self.obj_slots + 1e-6)
+        non_event = 1.0 - event_target.to(O_t.dtype).squeeze(-1)
+        smooth = (O_t - aligned_next).pow(2).mean(dim=-1)
+        smooth_weight = non_event.unsqueeze(-1)
+        if slot_weight is not None:
+            smooth_weight = smooth_weight * slot_weight
+        loss_smooth = self._weighted_mean(smooth, smooth_weight)
         match_score = match_confidence(match)
         return {
             "loss_match": loss_match,
@@ -80,14 +97,19 @@ class ObjectificationModule(nn.Module):
             "match_score": match_score,
         }
 
-    def _local_losses(self, target_delta_obj, delta_obj_pred):
-        return self.cf_locality(target_delta_obj, delta_obj_pred)
+    def _local_losses(self, target_delta_O, delta_O_pred, slot_weight):
+        return self.cf_locality(target_delta_O, delta_O_pred, slot_weight)
 
-    def _relational_losses(self, obj_view, next_obj_view, pred_next, z_eff, target_slot_prob):
-        current_rel = self._relation_matrix(obj_view)
-        next_rel = self._relation_matrix(next_obj_view)
+    def _relational_losses(self, O_t, next_O_t, pred_next, z_eff, target_slot_prob, slot_weight):
+        current_rel = self._relation_matrix(O_t)
+        next_rel = self._relation_matrix(next_O_t)
         pred_rel = self._relation_matrix(pred_next)
-        loss_pair = F.smooth_l1_loss(pred_rel, next_rel)
+        pair_err = F.smooth_l1_loss(pred_rel, next_rel, reduction="none")
+        if slot_weight is None:
+            loss_pair = pair_err.mean()
+        else:
+            pair_weight = slot_weight.unsqueeze(-1) * slot_weight.unsqueeze(-2)
+            loss_pair = self._weighted_mean(pair_err, pair_weight)
 
         motif_logits = self.motif_head(z_eff)
         motif_weights = torch.softmax(motif_logits, dim=-1)
@@ -109,8 +131,8 @@ class ObjectificationModule(nn.Module):
             "motif_usage_entropy": sample_entropy,
         }
 
-    def _relation_matrix(self, obj_view):
-        rel = F.normalize(self.rel_proj(obj_view), dim=-1)
+    def _relation_matrix(self, O_t):
+        rel = F.normalize(self.rel_proj(O_t), dim=-1)
         return torch.einsum("...id,...jd->...ij", rel, rel)
 
     def _objectness_score(self, stable_loss, local_loss, rel_loss):

@@ -198,6 +198,8 @@ class Arc3EnvTest(unittest.TestCase):
             self.assertEqual(obs["grid"].shape, (64, 64, 1))
             self.assertEqual(obs["grid"].dtype, np.int32)
             self.assertEqual(int(obs["grid"][4, 5, 0]), 3)
+            self.assertEqual(obs["valid_mask"].shape, (64, 64, 1))
+            self.assertEqual(float(obs["valid_mask"][4, 5, 0]), 1.0)
             self.assertEqual(obs["state_flags"].shape, (4,))
             self.assertEqual(obs["progress"].shape, (8,))
             self.assertEqual(obs["action_context"].shape, (8,))
@@ -247,8 +249,11 @@ class Arc3EnvTest(unittest.TestCase):
             env = Arc3Grid("ls20", size=(4, 4), grid_encoding="onehot", num_colors=8, num_special_tokens=2)
             obs = env.reset()
             self.assertEqual(obs["grid"].shape, (4, 4, 10))
+            self.assertEqual(obs["valid_mask"].shape, (4, 4, 1))
             self.assertEqual(int(np.argmax(obs["grid"][0, 0])), 0)
             self.assertEqual(int(np.argmax(obs["grid"][3, 3])), 8)
+            self.assertEqual(float(obs["valid_mask"][0, 0, 0]), 1.0)
+            self.assertEqual(float(obs["valid_mask"][3, 3, 0]), 0.0)
         finally:
             if old_arc_agi is None:
                 sys.modules.pop("arc_agi", None)

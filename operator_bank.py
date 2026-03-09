@@ -43,15 +43,15 @@ class OperatorBank(nn.Module):
         self.prototypes = nn.Parameter(torch.randn(self.num_operators, self.operator_dim))
         self.apply(tools.weight_init_)
 
-    def forward(self, feat, action, map_view, obj_view, global_view, rule_ctx, z_eff):
+    def forward(self, feat, action, M_t, O_t, g_t, rho_t, z_eff):
         context = torch.cat(
             [
                 feat,
                 action,
-                map_view.reshape(*map_view.shape[:-2], -1),
-                obj_view.reshape(*obj_view.shape[:-2], -1),
-                global_view,
-                rule_ctx,
+                M_t.reshape(*M_t.shape[:-2], -1),
+                O_t.reshape(*O_t.shape[:-2], -1),
+                g_t,
+                rho_t,
             ],
             dim=-1,
         )

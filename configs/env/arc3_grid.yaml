@@ -12,10 +12,10 @@ device: ${device}
 size: [64, 64]
 encoder:
   mlp_keys: 'state_flags|progress|action_context|action_mask'
-  cnn_keys: 'grid'
+  cnn_keys: 'grid|valid_mask'
 decoder:
   mlp_keys: 'state_flags|progress|action_context|action_mask'
-  cnn_keys: 'grid'
+  cnn_keys: 'grid|valid_mask'
 
 grid_encoding: token
 num_colors: 16

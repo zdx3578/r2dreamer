@@ -367,6 +367,7 @@ class Phase1ATest(unittest.TestCase):
         obs_space = DictSpace(
             {
                 "grid": BoxSpace((64, 64, 1)),
+                "valid_mask": BoxSpace((64, 64, 1)),
                 "state_flags": BoxSpace((4,)),
                 "progress": BoxSpace((8,)),
                 "action_context": BoxSpace((8,)),
@@ -376,6 +377,7 @@ class Phase1ATest(unittest.TestCase):
         grid = torch.randint(0, 16, (2, 4, 64, 64, 1), dtype=torch.int32)
         obs = {
             "grid": grid,
+            "valid_mask": torch.randint(0, 2, (2, 4, 64, 64, 1), dtype=torch.int64).to(torch.float32),
             "state_flags": torch.randn(2, 4, 4),
             "progress": torch.randn(2, 4, 8),
             "action_context": torch.randn(2, 4, 8),
@@ -384,12 +386,12 @@ class Phase1ATest(unittest.TestCase):
         self._run_case(
             obs_space,
             obs,
-            cnn_keys="^$",
+            cnn_keys="valid_mask",
             mlp_keys="state_flags|progress|action_context|action_mask",
             arc3_grid_keys="grid",
             action_shape=(8 + 64 + 64,),
         )
-        config = make_model_config(cnn_keys="^$", mlp_keys="state_flags|progress|action_context|action_mask", arc3_grid_keys="grid")
+        config = make_model_config(cnn_keys="valid_mask", mlp_keys="state_flags|progress|action_context|action_mask", arc3_grid_keys="grid")
         agent = Dreamer(config, obs_space, BoxSpace((8 + 64 + 64,)))
         self.assertIsInstance(agent.encoder.encoders[0], Arc3GridEncoder)
 
@@ -397,6 +399,7 @@ class Phase1ATest(unittest.TestCase):
         obs_space = DictSpace(
             {
                 "grid": BoxSpace((64, 64, 1)),
+                "valid_mask": BoxSpace((64, 64, 1)),
                 "state_flags": BoxSpace((4,)),
                 "progress": BoxSpace((8,)),
                 "action_context": BoxSpace((8,)),
@@ -405,6 +408,7 @@ class Phase1ATest(unittest.TestCase):
         )
         obs = {
             "grid": torch.randint(0, 16, (2, 4, 64, 64, 1), dtype=torch.int32),
+            "valid_mask": torch.randint(0, 2, (2, 4, 64, 64, 1), dtype=torch.int64).to(torch.float32),
             "state_flags": torch.randn(2, 4, 4),
             "progress": torch.randn(2, 4, 8),
             "action_context": torch.randn(2, 4, 8),
@@ -413,7 +417,7 @@ class Phase1ATest(unittest.TestCase):
         self._run_case(
             obs_space,
             obs,
-            cnn_keys="^$",
+            cnn_keys="valid_mask",
             mlp_keys="state_flags|progress|action_context|action_mask",
             arc3_grid_keys="grid",
             action_shape=(8 + 64 + 64,),
@@ -424,6 +428,7 @@ class Phase1ATest(unittest.TestCase):
         obs_space = DictSpace(
             {
                 "grid": BoxSpace((64, 64, 1)),
+                "valid_mask": BoxSpace((64, 64, 1)),
                 "state_flags": BoxSpace((4,)),
                 "progress": BoxSpace((8,)),
                 "action_context": BoxSpace((8,)),
@@ -432,6 +437,7 @@ class Phase1ATest(unittest.TestCase):
         )
         obs = {
             "grid": torch.randint(0, 16, (2, 4, 64, 64, 1), dtype=torch.int32),
+            "valid_mask": torch.randint(0, 2, (2, 4, 64, 64, 1), dtype=torch.int64).to(torch.float32),
             "state_flags": torch.randn(2, 4, 4),
             "progress": torch.randn(2, 4, 8),
             "action_context": torch.randn(2, 4, 8),
@@ -440,7 +446,7 @@ class Phase1ATest(unittest.TestCase):
         self._run_case(
             obs_space,
             obs,
-            cnn_keys="^$",
+            cnn_keys="valid_mask",
             mlp_keys="state_flags|progress|action_context|action_mask",
             arc3_grid_keys="grid",
             action_shape=(8 + 64 + 64,),

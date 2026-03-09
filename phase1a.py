@@ -1,4 +1,7 @@
+import math
+
 import torch
+import torch.nn.functional as F
 from torch import nn
 
 import tools
@@ -15,6 +18,22 @@ def _build_mlp(inp_dim, hidden_dim, layers, act_name, use_norm):
         modules.append(act())
         dim = int(hidden_dim)
     return nn.Sequential(*modules), dim
+
+
+def _slot_grid(num_slots):
+    rows = max(1, int(math.sqrt(num_slots)))
+    cols = int(math.ceil(float(num_slots) / float(rows)))
+    return rows, cols
+
+
+def _pool_mask_to_slots(valid_mask, slots):
+    batch_shape = valid_mask.shape[:-3]
+    mask = valid_mask.reshape(-1, 1, *valid_mask.shape[-3:-1]).to(torch.float32)
+    rows, cols = _slot_grid(slots)
+    pooled = F.adaptive_avg_pool2d(mask, (rows, cols)).flatten(2)[..., :slots]
+    if pooled.shape[-1] < slots:
+        pooled = F.pad(pooled, (0, slots - pooled.shape[-1]))
+    return pooled.reshape(*batch_shape, slots, 1)
 
 
 class StructuredReadout(nn.Module):
@@ -38,25 +57,48 @@ class StructuredReadout(nn.Module):
         self.global_recon = nn.Linear(self.global_dim + self.rule_dim, feat_dim, bias=True)
         self.apply(tools.weight_init_)
 
-    def forward(self, feat):
+    def forward(self, feat, valid_mask=None):
         hidden = self.trunk(feat)
         batch_shape = feat.shape[:-1]
-        map_view = torch.tanh(self.map_head(hidden)).reshape(*batch_shape, self.map_slots, self.map_dim)
-        obj_view = torch.tanh(self.obj_head(hidden)).reshape(*batch_shape, self.obj_slots, self.obj_dim)
-        global_view = torch.tanh(self.global_head(hidden))
-        rule_ctx = torch.tanh(self.rule_head(hidden))
+        M_t = torch.tanh(self.map_head(hidden)).reshape(*batch_shape, self.map_slots, self.map_dim)
+        O_t = torch.tanh(self.obj_head(hidden)).reshape(*batch_shape, self.obj_slots, self.obj_dim)
+        g_t = torch.tanh(self.global_head(hidden))
+        rho_t = torch.tanh(self.rule_head(hidden))
 
-        map_flat = map_view.reshape(*batch_shape, -1)
-        obj_flat = obj_view.reshape(*batch_shape, -1)
-        global_flat = torch.cat([global_view, rule_ctx], dim=-1)
+        if valid_mask is None:
+            map_mask = torch.ones(*batch_shape, self.map_slots, 1, device=feat.device, dtype=feat.dtype)
+            obj_mask = torch.ones(*batch_shape, self.obj_slots, 1, device=feat.device, dtype=feat.dtype)
+            valid_ratio = torch.ones(*batch_shape, 1, device=feat.device, dtype=feat.dtype)
+        else:
+            valid_mask = valid_mask.to(feat.dtype)
+            map_mask = _pool_mask_to_slots(valid_mask, self.map_slots).to(feat.dtype)
+            flat_map_mask = map_mask.squeeze(-1).reshape(-1, 1, self.map_slots)
+            pooled_obj_mask = F.adaptive_avg_pool1d(flat_map_mask, self.obj_slots)
+            obj_mask = pooled_obj_mask.reshape(*batch_shape, self.obj_slots, 1).to(feat.dtype)
+            valid_ratio = valid_mask.mean(dim=(-3, -2, -1), keepdim=False).unsqueeze(-1).to(feat.dtype)
+
+        map_gate = 0.25 + 0.75 * map_mask
+        obj_gate = 0.25 + 0.75 * obj_mask
+        global_gate = 0.25 + 0.75 * valid_ratio
+        M_t = M_t * map_gate
+        O_t = O_t * obj_gate
+        g_t = g_t * global_gate
+        rho_t = rho_t * global_gate
+
+        map_flat = M_t.reshape(*batch_shape, -1)
+        obj_flat = O_t.reshape(*batch_shape, -1)
+        global_flat = torch.cat([g_t, rho_t], dim=-1)
         return {
-            "map_view": map_view,
-            "obj_view": obj_view,
-            "global_view": global_view,
-            "rule_ctx": rule_ctx,
-            "map_recon": self.map_recon(map_flat),
-            "obj_recon": self.obj_recon(obj_flat),
-            "global_recon": self.global_recon(global_flat),
+            "M_t": M_t,
+            "O_t": O_t,
+            "g_t": g_t,
+            "rho_t": rho_t,
+            "map_mask": map_mask,
+            "obj_mask": obj_mask,
+            "valid_ratio": valid_ratio,
+            "M_recon": self.map_recon(map_flat),
+            "O_recon": self.obj_recon(obj_flat),
+            "g_rho_recon": self.global_recon(global_flat),
         }
 
 
@@ -68,8 +110,8 @@ class EffectModel(nn.Module):
         self.out = nn.Linear(out_dim, int(config.latent_dim), bias=True)
         self.apply(tools.weight_init_)
 
-    def forward(self, feat, action, rule_ctx):
-        hidden = self.trunk(torch.cat([feat, action, rule_ctx], dim=-1))
+    def forward(self, feat, action, rho_t):
+        hidden = self.trunk(torch.cat([feat, action, rho_t], dim=-1))
         return torch.tanh(self.out(hidden))
 
 
@@ -107,8 +149,8 @@ class ReachabilityHead(nn.Module):
         self.out = nn.Linear(out_dim, 1, bias=True)
         self.apply(tools.weight_init_)
 
-    def forward(self, feat, map_view):
-        x = torch.cat([feat, map_view.reshape(*map_view.shape[:-2], -1)], dim=-1)
+    def forward(self, feat, M_t):
+        x = torch.cat([feat, M_t.reshape(*M_t.shape[:-2], -1)], dim=-1)
         return self.out(self.trunk(x))
 
 
@@ -120,5 +162,5 @@ class GoalProgressHead(nn.Module):
         self.out = nn.Linear(out_dim, 1, bias=True)
         self.apply(tools.weight_init_)
 
-    def forward(self, feat, global_view):
-        return self.out(self.trunk(torch.cat([feat, global_view], dim=-1)))
+    def forward(self, feat, g_t):
+        return self.out(self.trunk(torch.cat([feat, g_t], dim=-1)))

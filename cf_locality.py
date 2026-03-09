@@ -10,10 +10,14 @@ class CounterfactualLocalityHead(nn.Module):
         super().__init__()
         self.obj_slots = int(obj_slots)
 
-    def forward(self, target_delta_obj, delta_obj_pred):
+    def forward(self, target_delta_obj, delta_obj_pred, slot_weight=None):
         eps = 1e-6
         pred_slot_mass = delta_obj_pred.abs().mean(dim=-1) + eps
         target_slot_mass = target_delta_obj.abs().mean(dim=-1) + eps
+        if slot_weight is not None:
+            slot_weight = slot_weight.to(pred_slot_mass.dtype)
+            pred_slot_mass = pred_slot_mass * slot_weight + eps
+            target_slot_mass = target_slot_mass * slot_weight + eps
         pred_slot_prob = pred_slot_mass / pred_slot_mass.sum(dim=-1, keepdim=True)
         target_slot_prob = target_slot_mass / target_slot_mass.sum(dim=-1, keepdim=True)
 
