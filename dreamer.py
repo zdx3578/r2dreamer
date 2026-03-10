@@ -112,10 +112,16 @@ class Dreamer(nn.Module):
         self.phase2_four_step_enable_retrieval = float(getattr(phase2_cfg, "four_step_curriculum_enable_retrieval", 0.65))
         self.phase2_four_step_enable_apply_error = float(getattr(phase2_cfg, "four_step_curriculum_enable_apply_error", 0.12))
         self.phase2_four_step_enable_memory_usage = float(getattr(phase2_cfg, "four_step_curriculum_enable_memory_usage", 0.05))
+        self.phase2_four_step_enable_fresh_usage = float(
+            getattr(phase2_cfg, "four_step_curriculum_enable_fresh_usage", 0.0)
+        )
         self.phase2_four_step_enable_rule_apply_error = float(
             getattr(phase2_cfg, "four_step_curriculum_enable_rule_apply_error", 0.12)
         )
         self.phase2_four_step_disable_retrieval = float(getattr(phase2_cfg, "four_step_curriculum_disable_retrieval", 0.58))
+        self.phase2_four_step_disable_fresh_usage = float(
+            getattr(phase2_cfg, "four_step_curriculum_disable_fresh_usage", 0.0)
+        )
         self.phase2_four_step_disable_four_step_error = float(
             getattr(phase2_cfg, "four_step_curriculum_disable_four_step_error", 0.18)
         )
@@ -131,6 +137,7 @@ class Dreamer(nn.Module):
             "two_step_retrieval_agreement": None,
             "two_step_apply_error": None,
             "rule_memory_usage": None,
+            "rule_memory_fresh_usage": None,
             "rule_apply_error": None,
             "four_step_apply_error": None,
             "seven_step_apply_error": None,
@@ -830,6 +837,7 @@ class Dreamer(nn.Module):
             "two_step_retrieval_agreement": self._metric_scalar(metrics, "phase2/two_step_retrieval_agreement"),
             "two_step_apply_error": self._metric_scalar(metrics, "phase2/two_step_apply_error"),
             "rule_memory_usage": self._metric_scalar(metrics, "phase2/rule_memory_usage"),
+            "rule_memory_fresh_usage": self._metric_scalar(metrics, "phase2/rule_memory_fresh_usage"),
             "rule_apply_error": self._metric_scalar(metrics, "phase2/rule_apply_error"),
             "four_step_apply_error": self._metric_scalar(metrics, "phase2/four_step_apply_error"),
             "seven_step_apply_error": self._metric_scalar(metrics, "phase2/seven_step_apply_error"),
@@ -856,13 +864,21 @@ class Dreamer(nn.Module):
             and ema["two_step_apply_error"] <= self.phase2_four_step_enable_apply_error
             and ema["rule_memory_usage"] is not None
             and ema["rule_memory_usage"] >= self.phase2_four_step_enable_memory_usage
+            and ema["rule_memory_fresh_usage"] is not None
+            and ema["rule_memory_fresh_usage"] >= self.phase2_four_step_enable_fresh_usage
             and ema["rule_apply_error"] is not None
             and ema["rule_apply_error"] <= self.phase2_four_step_enable_rule_apply_error
+        )
+        retrieval_collapse = bool(
+            ema["two_step_retrieval_agreement"] is not None
+            and ema["two_step_retrieval_agreement"] < self.phase2_four_step_disable_retrieval
+            and ema["rule_memory_fresh_usage"] is not None
+            and ema["rule_memory_fresh_usage"] < self.phase2_four_step_disable_fresh_usage
         )
         disable_ready = bool(
             self._phase2_four_step_curriculum_enabled
             and (
-                (ema["two_step_retrieval_agreement"] is not None and ema["two_step_retrieval_agreement"] < self.phase2_four_step_disable_retrieval)
+                retrieval_collapse
                 or (
                     ema["four_step_apply_error"] is not None
                     and ema["four_step_apply_error"] > self.phase2_four_step_disable_four_step_error

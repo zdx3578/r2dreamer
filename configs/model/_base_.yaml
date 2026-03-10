@@ -95,7 +95,7 @@ phase2:
   memory_prior_soft_cap: 0.75
   memory_sparse_temperature_boost: 1.0
   memory_ema_decay: 0.99
-  memory_support_decay: 0.995
+  memory_support_decay: 0.996
   memory_support_min: 0.0001
   memory_prototype_decay: 0.95
   memory_prototype_min_blend: 0.05
@@ -111,8 +111,10 @@ phase2:
   four_step_curriculum_enable_retrieval: 0.65
   four_step_curriculum_enable_apply_error: 0.12
   four_step_curriculum_enable_memory_usage: 0.05
+  four_step_curriculum_enable_fresh_usage: 0.12
   four_step_curriculum_enable_rule_apply_error: 0.12
-  four_step_curriculum_disable_retrieval: 0.50
+  four_step_curriculum_disable_retrieval: 0.65
+  four_step_curriculum_disable_fresh_usage: 0.04
   four_step_curriculum_disable_four_step_error: 0.18
   four_step_curriculum_disable_seven_step_error: 0.28
   use_memory_fusion: True

@@ -371,8 +371,10 @@ class Phase2RuleExecutionTest(unittest.TestCase):
             phase2_four_step_enable_retrieval=0.65,
             phase2_four_step_enable_apply_error=0.12,
             phase2_four_step_enable_memory_usage=0.05,
+            phase2_four_step_enable_fresh_usage=0.12,
             phase2_four_step_enable_rule_apply_error=0.12,
-            phase2_four_step_disable_retrieval=0.58,
+            phase2_four_step_disable_retrieval=0.65,
+            phase2_four_step_disable_fresh_usage=0.04,
             phase2_four_step_disable_four_step_error=0.18,
             phase2_four_step_disable_seven_step_error=0.28,
             _phase2_four_step_curriculum_enabled=False,
@@ -384,6 +386,7 @@ class Phase2RuleExecutionTest(unittest.TestCase):
                 "two_step_retrieval_agreement": None,
                 "two_step_apply_error": None,
                 "rule_memory_usage": None,
+                "rule_memory_fresh_usage": None,
                 "rule_apply_error": None,
                 "four_step_apply_error": None,
                 "seven_step_apply_error": None,
@@ -395,6 +398,7 @@ class Phase2RuleExecutionTest(unittest.TestCase):
             "phase2/two_step_retrieval_agreement": torch.tensor(0.95),
             "phase2/two_step_apply_error": torch.tensor(0.01),
             "phase2/rule_memory_usage": torch.tensor(0.2),
+            "phase2/rule_memory_fresh_usage": torch.tensor(0.15),
             "phase2/rule_apply_error": torch.tensor(0.01),
             "phase2/four_step_apply_error": torch.tensor(0.02),
             "phase2/seven_step_apply_error": torch.tensor(0.03),
@@ -407,18 +411,53 @@ class Phase2RuleExecutionTest(unittest.TestCase):
         self.assertEqual(float(second["phase2/four_step_curriculum_active"]), 1.0)
         self.assertGreater(float(second["phase2/four_step_curriculum_scale"]), 0.0)
 
+        low_fresh_metrics = {
+            **stable_metrics,
+            "phase2/rule_memory_fresh_usage": torch.tensor(0.02),
+        }
+        helper._phase2_four_step_curriculum_enabled = False
+        helper._phase2_four_step_curriculum_ready_streak = 0
+        helper._phase2_four_step_curriculum_release_streak = 0
+        helper._phase2_four_step_curriculum_progress = 0.0
+        helper._phase2_four_step_curriculum_ema = {
+            "two_step_memory_conf": None,
+            "two_step_retrieval_agreement": None,
+            "two_step_apply_error": None,
+            "rule_memory_usage": None,
+            "rule_memory_fresh_usage": None,
+            "rule_apply_error": None,
+            "four_step_apply_error": None,
+            "seven_step_apply_error": None,
+        }
+        blocked = Dreamer._phase2_update_four_step_curriculum(helper, low_fresh_metrics)
+        self.assertEqual(float(blocked["phase2/four_step_curriculum_active"]), 0.0)
+
         degraded_metrics = {
             **stable_metrics,
-            "phase2/two_step_retrieval_agreement": torch.tensor(0.3),
-            "phase2/four_step_apply_error": torch.tensor(0.4),
-            "phase2/seven_step_apply_error": torch.tensor(0.4),
+            "phase2/two_step_retrieval_agreement": torch.tensor(0.6),
+            "phase2/rule_memory_fresh_usage": torch.tensor(0.02),
         }
-        Dreamer._phase2_update_four_step_curriculum(helper, degraded_metrics)
+        helper._phase2_four_step_curriculum_enabled = True
+        helper._phase2_four_step_curriculum_ready_streak = 0
+        helper._phase2_four_step_curriculum_release_streak = 0
+        helper._phase2_four_step_curriculum_progress = 0.5
+        helper._phase2_four_step_curriculum_ema = {
+            "two_step_memory_conf": None,
+            "two_step_retrieval_agreement": None,
+            "two_step_apply_error": None,
+            "rule_memory_usage": None,
+            "rule_memory_fresh_usage": None,
+            "rule_apply_error": None,
+            "four_step_apply_error": None,
+            "seven_step_apply_error": None,
+        }
+        third = Dreamer._phase2_update_four_step_curriculum(helper, degraded_metrics)
         fourth = Dreamer._phase2_update_four_step_curriculum(helper, degraded_metrics)
 
+        self.assertEqual(float(third["phase2/four_step_curriculum_active"]), 1.0)
         self.assertEqual(float(fourth["phase2/four_step_curriculum_active"]), 0.0)
         self.assertLessEqual(
-            float(fourth["phase2/four_step_curriculum_scale"]), float(second["phase2/four_step_curriculum_scale"])
+            float(fourth["phase2/four_step_curriculum_scale"]), float(third["phase2/four_step_curriculum_scale"])
         )
 
 
