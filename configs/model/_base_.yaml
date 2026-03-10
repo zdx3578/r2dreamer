@@ -102,9 +102,9 @@ phase2:
   memory_agreement_threshold: 0.7
   memory_agreement_delta_threshold: 0.001
   four_step_curriculum: True
-  four_step_curriculum_warmup_updates: 1500
+  four_step_curriculum_warmup_updates: 500
   four_step_curriculum_hold_updates: 5
-  four_step_curriculum_release_updates: 3
+  four_step_curriculum_release_updates: 12
   four_step_curriculum_ramp_updates: 25
   four_step_curriculum_ema_decay: 0.9
   four_step_curriculum_enable_memory_conf: 0.10
@@ -112,7 +112,7 @@ phase2:
   four_step_curriculum_enable_apply_error: 0.12
   four_step_curriculum_enable_memory_usage: 0.05
   four_step_curriculum_enable_rule_apply_error: 0.12
-  four_step_curriculum_disable_retrieval: 0.58
+  four_step_curriculum_disable_retrieval: 0.50
   four_step_curriculum_disable_four_step_error: 0.18
   four_step_curriculum_disable_seven_step_error: 0.28
   use_memory_fusion: True
