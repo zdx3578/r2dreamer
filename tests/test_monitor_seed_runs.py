@@ -19,6 +19,12 @@ class MonitorSeedRunsTest(unittest.TestCase):
                 "train/phase2/two_step_memory_conf": 0.18,
                 "train/phase2/two_step_retrieval_agreement": 0.44,
                 "train/phase2/two_step_apply_error": 0.30,
+                "train/phase2/four_step_memory_conf": 0.16,
+                "train/phase2/four_step_retrieval_agreement": 0.40,
+                "train/phase2/four_step_apply_error": 0.36,
+                "train/phase2/seven_step_memory_conf": 0.12,
+                "train/phase2/seven_step_retrieval_agreement": 0.32,
+                "train/phase2/seven_step_apply_error": 0.44,
                 "train/ret": 0.1,
             },
             {
@@ -31,6 +37,12 @@ class MonitorSeedRunsTest(unittest.TestCase):
                 "train/phase2/two_step_memory_conf": 0.27,
                 "train/phase2/two_step_retrieval_agreement": 0.63,
                 "train/phase2/two_step_apply_error": 0.18,
+                "train/phase2/four_step_memory_conf": 0.23,
+                "train/phase2/four_step_retrieval_agreement": 0.58,
+                "train/phase2/four_step_apply_error": 0.22,
+                "train/phase2/seven_step_memory_conf": 0.18,
+                "train/phase2/seven_step_retrieval_agreement": 0.47,
+                "train/phase2/seven_step_apply_error": 0.28,
                 "train/ret": 0.3,
             },
             {
@@ -43,6 +55,12 @@ class MonitorSeedRunsTest(unittest.TestCase):
                 "train/phase2/two_step_memory_conf": 0.35,
                 "train/phase2/two_step_retrieval_agreement": 0.72,
                 "train/phase2/two_step_apply_error": 0.09,
+                "train/phase2/four_step_memory_conf": 0.31,
+                "train/phase2/four_step_retrieval_agreement": 0.66,
+                "train/phase2/four_step_apply_error": 0.14,
+                "train/phase2/seven_step_memory_conf": 0.26,
+                "train/phase2/seven_step_retrieval_agreement": 0.57,
+                "train/phase2/seven_step_apply_error": 0.19,
                 "train/ret": 0.2,
             },
         ]
@@ -66,6 +84,18 @@ class MonitorSeedRunsTest(unittest.TestCase):
         self.assertAlmostEqual(peaks["phase2_two_step_retrieval_agreement"]["value"], 0.72)
         self.assertEqual(peaks["phase2_two_step_apply_error"]["step"], 300)
         self.assertAlmostEqual(peaks["phase2_two_step_apply_error"]["value"], 0.09)
+        self.assertEqual(peaks["phase2_four_step_memory_conf"]["step"], 300)
+        self.assertAlmostEqual(peaks["phase2_four_step_memory_conf"]["value"], 0.31)
+        self.assertEqual(peaks["phase2_four_step_retrieval_agreement"]["step"], 300)
+        self.assertAlmostEqual(peaks["phase2_four_step_retrieval_agreement"]["value"], 0.66)
+        self.assertEqual(peaks["phase2_four_step_apply_error"]["step"], 300)
+        self.assertAlmostEqual(peaks["phase2_four_step_apply_error"]["value"], 0.14)
+        self.assertEqual(peaks["phase2_seven_step_memory_conf"]["step"], 300)
+        self.assertAlmostEqual(peaks["phase2_seven_step_memory_conf"]["value"], 0.26)
+        self.assertEqual(peaks["phase2_seven_step_retrieval_agreement"]["step"], 300)
+        self.assertAlmostEqual(peaks["phase2_seven_step_retrieval_agreement"]["value"], 0.57)
+        self.assertEqual(peaks["phase2_seven_step_apply_error"]["step"], 300)
+        self.assertAlmostEqual(peaks["phase2_seven_step_apply_error"]["value"], 0.19)
         self.assertEqual(peaks["ret"]["step"], 200)
         self.assertAlmostEqual(peaks["ret"]["value"], 0.3)
 
@@ -129,6 +159,12 @@ class MonitorSeedRunsTest(unittest.TestCase):
                 "train/phase2/two_step_retrieval_agreement": 0.66,
                 "train/phase2/two_step_apply_error": 0.16,
                 "train/phase2/two_step_fused_delta_rule_abs": 0.06,
+                "train/phase2/four_step_memory_conf": 0.18,
+                "train/phase2/four_step_retrieval_agreement": 0.60,
+                "train/phase2/four_step_apply_error": 0.21,
+                "train/phase2/seven_step_memory_conf": 0.13,
+                "train/phase2/seven_step_retrieval_agreement": 0.48,
+                "train/phase2/seven_step_apply_error": 0.29,
                 "train/ret": 0.4,
                 "episode/score": 120.0,
                 "episode/length": 460.0,
@@ -191,6 +227,12 @@ class MonitorSeedRunsTest(unittest.TestCase):
                 "train/phase2/two_step_retrieval_agreement": 0.76,
                 "train/phase2/two_step_apply_error": 0.09,
                 "train/phase2/two_step_fused_delta_rule_abs": 0.05,
+                "train/phase2/four_step_memory_conf": 0.25,
+                "train/phase2/four_step_retrieval_agreement": 0.70,
+                "train/phase2/four_step_apply_error": 0.13,
+                "train/phase2/seven_step_memory_conf": 0.19,
+                "train/phase2/seven_step_retrieval_agreement": 0.58,
+                "train/phase2/seven_step_apply_error": 0.20,
                 "train/ret": 0.5,
                 "episode/score": 180.0,
                 "episode/length": 480.0,

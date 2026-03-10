@@ -47,6 +47,12 @@ PEAK_METRICS = {
     "phase2_two_step_memory_conf": {"key": "train/phase2/two_step_memory_conf", "mode": "max"},
     "phase2_two_step_retrieval_agreement": {"key": "train/phase2/two_step_retrieval_agreement", "mode": "max"},
     "phase2_two_step_apply_error": {"key": "train/phase2/two_step_apply_error", "mode": "min"},
+    "phase2_four_step_memory_conf": {"key": "train/phase2/four_step_memory_conf", "mode": "max"},
+    "phase2_four_step_retrieval_agreement": {"key": "train/phase2/four_step_retrieval_agreement", "mode": "max"},
+    "phase2_four_step_apply_error": {"key": "train/phase2/four_step_apply_error", "mode": "min"},
+    "phase2_seven_step_memory_conf": {"key": "train/phase2/seven_step_memory_conf", "mode": "max"},
+    "phase2_seven_step_retrieval_agreement": {"key": "train/phase2/seven_step_retrieval_agreement", "mode": "max"},
+    "phase2_seven_step_apply_error": {"key": "train/phase2/seven_step_apply_error", "mode": "min"},
     "ret": {"key": "train/ret", "mode": "max"},
 }
 

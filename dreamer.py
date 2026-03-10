@@ -904,47 +904,82 @@ class Dreamer(nn.Module):
             structured["objectification_out"]["objectness_score"],
         )
 
-    def _phase2_rollout(self, artifact, structured, data):
-        if artifact.rho_next_pred.shape[1] < 2:
-            return {}, {}
+    def _phase2_rollout_prefix(self, horizon):
+        names = {2: "two_step", 4: "four_step", 7: "seven_step"}
+        return names.get(int(horizon), f"{int(horizon)}_step")
 
-        rollout_current = {
-            "M_t": structured["nxt"]["M_t"][:, :-1],
-            "O_t": structured["nxt"]["O_t"][:, :-1],
-            "g_t": structured["nxt"]["g_t"][:, :-1],
-            "rho_t": artifact.rho_next_pred[:, :-1],
-        }
-        rollout_art = self._phase2_step_forward(
-            structured["feat_seq"][:, 1:-1],
-            data["action"][:, 1:],
-            rollout_current,
-            self.effect_model(structured["feat_seq"][:, 1:-1], data["action"][:, 1:], rollout_current["rho_t"]),
-            structured["objectification_out"]["objectness_score"],
-        )
-        rollout_target = structured["readouts"]["rho_t"][:, 2:]
-        rollout_valid = structured["transition_valid_ratio"][:, 1:] * rollout_art.gate
-        two_step_apply_loss = self._weighted_loss(
-            rollout_art.rho_next_pred,
+    def _phase2_rollout_weight(self, transition_valid_ratio, horizon):
+        chain = transition_valid_ratio[:, : transition_valid_ratio.shape[1] - horizon + 1]
+        for offset in range(1, int(horizon)):
+            chain = chain * transition_valid_ratio[:, offset : offset + chain.shape[1]]
+        return chain
+
+    def _phase2_rollout_horizon(self, artifact, structured, data, horizon):
+        horizon = int(horizon)
+        if artifact.rho_next_pred.shape[1] < horizon:
+            return None
+
+        predicted_rho = artifact.rho_next_pred
+        rollout_art = artifact
+        for offset in range(1, horizon):
+            next_len = predicted_rho.shape[1] - 1
+            if next_len <= 0:
+                return None
+            rollout_current = {
+                "M_t": structured["readouts"]["M_t"][:, offset : offset + next_len],
+                "O_t": structured["readouts"]["O_t"][:, offset : offset + next_len],
+                "g_t": structured["readouts"]["g_t"][:, offset : offset + next_len],
+                "rho_t": predicted_rho[:, :next_len],
+            }
+            feat = structured["feat_seq"][:, offset : offset + next_len]
+            action = data["action"][:, offset : offset + next_len]
+            rollout_art = self._phase2_step_forward(
+                feat,
+                action,
+                rollout_current,
+                self.effect_model(feat, action, rollout_current["rho_t"]),
+                structured["objectification_out"]["objectness_score"],
+            )
+            predicted_rho = rollout_art.rho_next_pred
+
+        rollout_target = structured["readouts"]["rho_t"][:, horizon : horizon + predicted_rho.shape[1]]
+        rollout_valid = self._phase2_rollout_weight(structured["transition_valid_ratio"], horizon) * rollout_art.gate
+        apply_loss = self._weighted_loss(
+            predicted_rho,
             rollout_target,
             rollout_valid,
             kind="smooth_l1",
         )
-        two_step_retrieval_agreement = F.cosine_similarity(
+        retrieval_agreement = F.cosine_similarity(
             rollout_art.delta_rule_pred.reshape(-1, rollout_art.delta_rule_pred.shape[-1]),
             rollout_art.memory_delta_rule.reshape(-1, rollout_art.memory_delta_rule.shape[-1]) + 1e-6,
             dim=-1,
         )
-        two_step_retrieval_agreement = 0.5 * (1.0 + two_step_retrieval_agreement).mean()
-        losses = {
-            "two_step_apply": two_step_apply_loss,
-        }
+        retrieval_agreement = 0.5 * (1.0 + retrieval_agreement).mean()
+        prefix = self._phase2_rollout_prefix(horizon)
         metrics = {
-            "phase2/two_step_gate_scale": rollout_art.gate.mean(),
-            "phase2/two_step_memory_conf": rollout_art.memory_conf.mean(),
-            "phase2/two_step_retrieval_agreement": two_step_retrieval_agreement,
-            "phase2/two_step_apply_error": two_step_apply_loss.detach(),
-            "phase2/two_step_fused_delta_rule_abs": rollout_art.delta_rule_fused.abs().mean(),
+            f"phase2/{prefix}_gate_scale": rollout_art.gate.mean(),
+            f"phase2/{prefix}_memory_conf": rollout_art.memory_conf.mean(),
+            f"phase2/{prefix}_retrieval_agreement": retrieval_agreement,
+            f"phase2/{prefix}_apply_error": apply_loss.detach(),
+            f"phase2/{prefix}_fused_delta_rule_abs": rollout_art.delta_rule_fused.abs().mean(),
         }
+        return {
+            "prefix": prefix,
+            "loss": apply_loss,
+            "metrics": metrics,
+        }
+
+    def _phase2_rollout(self, artifact, structured, data):
+        losses = {}
+        metrics = {}
+        for horizon in (2, 4, 7):
+            rollout = self._phase2_rollout_horizon(artifact, structured, data, horizon)
+            if rollout is None:
+                continue
+            metrics.update(rollout["metrics"])
+            if horizon == 2:
+                losses["two_step_apply"] = rollout["loss"]
         return losses, metrics
 
     def _phase2_losses(self, artifact, structured):
