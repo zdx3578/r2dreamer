@@ -100,6 +100,41 @@ class Dreamer(nn.Module):
         self.phase2_memory_write_delta_threshold = float(getattr(phase2_cfg, "memory_write_delta_threshold", 1e-3))
         self.phase2_memory_agreement_threshold = float(getattr(phase2_cfg, "memory_agreement_threshold", 0.7))
         self.phase2_memory_agreement_delta_threshold = float(getattr(phase2_cfg, "memory_agreement_delta_threshold", 1e-3))
+        self.phase2_four_step_curriculum = bool(getattr(phase2_cfg, "four_step_curriculum", True))
+        self.phase2_four_step_curriculum_warmup = int(
+            getattr(phase2_cfg, "four_step_curriculum_warmup_updates", max(self.phase2_warmup_updates, 1000))
+        )
+        self.phase2_four_step_curriculum_hold = int(getattr(phase2_cfg, "four_step_curriculum_hold_updates", 5))
+        self.phase2_four_step_curriculum_release = int(getattr(phase2_cfg, "four_step_curriculum_release_updates", 3))
+        self.phase2_four_step_curriculum_ramp = int(getattr(phase2_cfg, "four_step_curriculum_ramp_updates", 25))
+        self.phase2_four_step_curriculum_ema_decay = float(getattr(phase2_cfg, "four_step_curriculum_ema_decay", 0.9))
+        self.phase2_four_step_enable_memory_conf = float(getattr(phase2_cfg, "four_step_curriculum_enable_memory_conf", 0.10))
+        self.phase2_four_step_enable_retrieval = float(getattr(phase2_cfg, "four_step_curriculum_enable_retrieval", 0.65))
+        self.phase2_four_step_enable_apply_error = float(getattr(phase2_cfg, "four_step_curriculum_enable_apply_error", 0.12))
+        self.phase2_four_step_enable_memory_usage = float(getattr(phase2_cfg, "four_step_curriculum_enable_memory_usage", 0.05))
+        self.phase2_four_step_enable_rule_apply_error = float(
+            getattr(phase2_cfg, "four_step_curriculum_enable_rule_apply_error", 0.12)
+        )
+        self.phase2_four_step_disable_retrieval = float(getattr(phase2_cfg, "four_step_curriculum_disable_retrieval", 0.58))
+        self.phase2_four_step_disable_four_step_error = float(
+            getattr(phase2_cfg, "four_step_curriculum_disable_four_step_error", 0.18)
+        )
+        self.phase2_four_step_disable_seven_step_error = float(
+            getattr(phase2_cfg, "four_step_curriculum_disable_seven_step_error", 0.28)
+        )
+        self._phase2_four_step_curriculum_enabled = not self.phase2_four_step_curriculum
+        self._phase2_four_step_curriculum_ready_streak = 0
+        self._phase2_four_step_curriculum_release_streak = 0
+        self._phase2_four_step_curriculum_progress = 1.0 if not self.phase2_four_step_curriculum else 0.0
+        self._phase2_four_step_curriculum_ema = {
+            "two_step_memory_conf": None,
+            "two_step_retrieval_agreement": None,
+            "two_step_apply_error": None,
+            "rule_memory_usage": None,
+            "rule_apply_error": None,
+            "four_step_apply_error": None,
+            "seven_step_apply_error": None,
+        }
         objectification_cfg = getattr(config, "objectification", None)
         self.phase1b_curriculum_updates = int(getattr(objectification_cfg, "curriculum_updates", 0))
         self.phase1b_early_loss_scales = {
@@ -761,12 +796,115 @@ class Dreamer(nn.Module):
         return priority.detach().clamp_min(1e-4)
 
     def _loss_scale_for(self, name):
+        if name == "four_step_apply" and self.phase2_four_step_curriculum:
+            return float(self._loss_scales[name]) * float(self._phase2_four_step_curriculum_progress)
         scale = float(self._loss_scales[name])
         if name not in self.phase1b_early_loss_scales or self.phase1b_curriculum_updates <= 0:
             return scale
         progress = min(1.0, float(self._model_updates) / float(self.phase1b_curriculum_updates))
         early = float(self.phase1b_early_loss_scales[name])
         return early + (scale - early) * progress
+
+    def _metric_scalar(self, metrics, key):
+        value = metrics.get(key)
+        if value is None:
+            return None
+        if torch.is_tensor(value):
+            if value.numel() != 1:
+                return None
+            value = value.detach().item()
+        return float(value)
+
+    def _phase2_update_four_step_curriculum(self, metrics):
+        base_scale = float(self._loss_scales.get("four_step_apply", 1.0))
+        if not self.phase2_four_step_curriculum:
+            return {
+                "phase2/four_step_curriculum_scale": torch.tensor(base_scale, device=self.device),
+                "phase2/four_step_curriculum_active": torch.tensor(1.0, device=self.device),
+                "phase2/four_step_curriculum_ready_streak": torch.tensor(0.0, device=self.device),
+                "phase2/four_step_curriculum_release_streak": torch.tensor(0.0, device=self.device),
+            }
+
+        current = {
+            "two_step_memory_conf": self._metric_scalar(metrics, "phase2/two_step_memory_conf"),
+            "two_step_retrieval_agreement": self._metric_scalar(metrics, "phase2/two_step_retrieval_agreement"),
+            "two_step_apply_error": self._metric_scalar(metrics, "phase2/two_step_apply_error"),
+            "rule_memory_usage": self._metric_scalar(metrics, "phase2/rule_memory_usage"),
+            "rule_apply_error": self._metric_scalar(metrics, "phase2/rule_apply_error"),
+            "four_step_apply_error": self._metric_scalar(metrics, "phase2/four_step_apply_error"),
+            "seven_step_apply_error": self._metric_scalar(metrics, "phase2/seven_step_apply_error"),
+        }
+        decay = self.phase2_four_step_curriculum_ema_decay
+        for name, value in current.items():
+            if value is None:
+                continue
+            prev = self._phase2_four_step_curriculum_ema[name]
+            if prev is None:
+                self._phase2_four_step_curriculum_ema[name] = value
+            else:
+                self._phase2_four_step_curriculum_ema[name] = decay * prev + (1.0 - decay) * value
+
+        ema = self._phase2_four_step_curriculum_ema
+        after_warmup = (self._model_updates + 1) >= self.phase2_four_step_curriculum_warmup
+        enable_ready = bool(
+            after_warmup
+            and ema["two_step_memory_conf"] is not None
+            and ema["two_step_memory_conf"] >= self.phase2_four_step_enable_memory_conf
+            and ema["two_step_retrieval_agreement"] is not None
+            and ema["two_step_retrieval_agreement"] >= self.phase2_four_step_enable_retrieval
+            and ema["two_step_apply_error"] is not None
+            and ema["two_step_apply_error"] <= self.phase2_four_step_enable_apply_error
+            and ema["rule_memory_usage"] is not None
+            and ema["rule_memory_usage"] >= self.phase2_four_step_enable_memory_usage
+            and ema["rule_apply_error"] is not None
+            and ema["rule_apply_error"] <= self.phase2_four_step_enable_rule_apply_error
+        )
+        disable_ready = bool(
+            self._phase2_four_step_curriculum_enabled
+            and (
+                (ema["two_step_retrieval_agreement"] is not None and ema["two_step_retrieval_agreement"] < self.phase2_four_step_disable_retrieval)
+                or (
+                    ema["four_step_apply_error"] is not None
+                    and ema["four_step_apply_error"] > self.phase2_four_step_disable_four_step_error
+                )
+                or (
+                    ema["seven_step_apply_error"] is not None
+                    and ema["seven_step_apply_error"] > self.phase2_four_step_disable_seven_step_error
+                )
+            )
+        )
+
+        self._phase2_four_step_curriculum_ready_streak = self._phase2_four_step_curriculum_ready_streak + 1 if enable_ready else 0
+        self._phase2_four_step_curriculum_release_streak = (
+            self._phase2_four_step_curriculum_release_streak + 1 if disable_ready else 0
+        )
+        if not self._phase2_four_step_curriculum_enabled:
+            if self._phase2_four_step_curriculum_ready_streak >= self.phase2_four_step_curriculum_hold:
+                self._phase2_four_step_curriculum_enabled = True
+        elif self._phase2_four_step_curriculum_release_streak >= self.phase2_four_step_curriculum_release:
+            self._phase2_four_step_curriculum_enabled = False
+            self._phase2_four_step_curriculum_ready_streak = 0
+
+        ramp_step = 1.0 / max(1, self.phase2_four_step_curriculum_ramp)
+        if self._phase2_four_step_curriculum_enabled:
+            self._phase2_four_step_curriculum_progress = min(1.0, self._phase2_four_step_curriculum_progress + ramp_step)
+        else:
+            self._phase2_four_step_curriculum_progress = max(0.0, self._phase2_four_step_curriculum_progress - ramp_step)
+
+        return {
+            "phase2/four_step_curriculum_scale": torch.tensor(
+                base_scale * self._phase2_four_step_curriculum_progress, device=self.device
+            ),
+            "phase2/four_step_curriculum_active": torch.tensor(
+                float(self._phase2_four_step_curriculum_enabled), device=self.device
+            ),
+            "phase2/four_step_curriculum_ready_streak": torch.tensor(
+                float(self._phase2_four_step_curriculum_ready_streak), device=self.device
+            ),
+            "phase2/four_step_curriculum_release_streak": torch.tensor(
+                float(self._phase2_four_step_curriculum_release_streak), device=self.device
+            ),
+        }
 
     def _phase2_gate(self, objectification_out):
         if isinstance(objectification_out, dict):
@@ -887,6 +1025,8 @@ class Dreamer(nn.Module):
             memory_conf=memory_out["memory_conf"],
             memory_weights=memory_out["memory_weights"],
             memory_top_weight=memory_out["memory_top_weight"],
+            memory_prior_scale=memory_out["memory_prior_scale"],
+            memory_retrieve_temperature=memory_out["memory_retrieve_temperature"],
             delta_rule_fused=apply_out["delta_rule_fused"],
             rho_next_pred=apply_out["rho_next_pred"],
             fusion_alpha=apply_out["alpha"],
@@ -1088,6 +1228,8 @@ class Dreamer(nn.Module):
             "phase2/rule_delta_abs": (structured["target_delta_rho"].abs() * structured["transition_valid_ratio"]).mean(),
             "phase2/memory_conf": artifact.memory_conf.mean(),
             "phase2/retrieval_peak": artifact.memory_top_weight.mean(),
+            "phase2/retrieval_prior_scale": artifact.memory_prior_scale.mean(),
+            "phase2/retrieval_temperature": artifact.memory_retrieve_temperature.mean(),
             "phase2/retrieval_agreement": retrieval_agreement,
             "phase2/memory_read_error": memory_read_loss.detach(),
             "phase2/memory_agreement_error": memory_agreement_loss.detach(),
@@ -1281,6 +1423,7 @@ class Dreamer(nn.Module):
                 losses.update(rollout_losses)
                 metrics.update(rollout_metrics)
                 metrics.update(self._phase2_memory_update(phase2_art, structured))
+                metrics.update(self._phase2_update_four_step_curriculum(metrics))
             replay_priority = self._replay_priorities(structured)
             if replay_priority is not None:
                 metrics["replay/priority_mean"] = replay_priority.mean()

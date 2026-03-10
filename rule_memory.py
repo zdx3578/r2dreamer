@@ -21,6 +21,9 @@ class RuleMemory(nn.Module):
         self.usage_logit_scale = float(getattr(config, "memory_usage_logit_scale", 0.5))
         self.conf_logit_scale = float(getattr(config, "memory_conf_logit_scale", 0.5))
         self.signature_logit_scale = float(getattr(config, "memory_signature_logit_scale", 1.0))
+        self.prior_min_population = float(getattr(config, "memory_prior_min_population", 4.0))
+        self.prior_soft_cap = float(getattr(config, "memory_prior_soft_cap", 0.75))
+        self.sparse_temperature_boost = float(getattr(config, "memory_sparse_temperature_boost", 1.0))
 
         self.register_buffer(
             "delta_rule_proto", torch.zeros(self.num_operators, self.num_bindings, self.rule_dim), persistent=True
@@ -38,9 +41,14 @@ class RuleMemory(nn.Module):
         valid_cells = (self.support_ema > self.support_min).to(joint.dtype)
         joint_logit = torch.log(joint.clamp_min(1e-6))
 
+        occupied_count = valid_cells.sum()
+        population_scale = occupied_count / max(1.0, self.prior_min_population)
+        population_scale = torch.clamp(population_scale, 0.0, 1.0)
         support_prior = torch.log1p(self.support_ema)
         support_prior = support_prior / support_prior.amax().clamp_min(1.0)
+        support_prior = torch.clamp(support_prior * population_scale, 0.0, self.prior_soft_cap)
         conf_prior = self.ema_conf / self.ema_conf.amax().clamp_min(1e-6)
+        conf_prior = torch.clamp(conf_prior * population_scale, 0.0, self.prior_soft_cap)
 
         if q_sigma is None:
             signature_score = joint.new_ones(joint.shape)
@@ -60,7 +68,8 @@ class RuleMemory(nn.Module):
         flat_logits = logits.reshape(*joint.shape[:-2], -1)
         flat_valid = valid_cells.reshape(1, *([1] * (flat_logits.ndim - 2)), -1).expand_as(flat_logits)
         masked_logits = torch.where(flat_valid > 0, flat_logits, torch.full_like(flat_logits, -1e9))
-        flat_weights = F.softmax(masked_logits / self.retrieve_temperature, dim=-1)
+        effective_temperature = self.retrieve_temperature * (1.0 + self.sparse_temperature_boost * (1.0 - population_scale))
+        flat_weights = F.softmax(masked_logits / effective_temperature.clamp_min(1e-6), dim=-1)
         flat_weights = flat_weights * flat_valid
         flat_weights = flat_weights / flat_weights.sum(dim=-1, keepdim=True).clamp_min(1e-6)
         weights = flat_weights.reshape_as(joint)
@@ -72,13 +81,15 @@ class RuleMemory(nn.Module):
         top_weight, top_index = flat_weights.max(dim=-1, keepdim=True)
         top_conf = flat_conf.gather(-1, top_index)
         top_signature = flat_signature.gather(-1, top_index)
-        memory_conf = torch.clamp(top_weight * top_conf * top_signature, 0.0, 1.0)
+        memory_conf = torch.clamp(top_weight * top_conf * top_signature * population_scale, 0.0, 1.0)
         return {
             "memory_delta_rule": memory_delta_rule,
             "memory_signature_proto": memory_signature,
             "memory_conf": memory_conf,
             "memory_weights": weights,
             "memory_top_weight": top_weight,
+            "memory_prior_scale": population_scale,
+            "memory_retrieve_temperature": effective_temperature,
         }
 
     def update(self, q_u, q_b, q_sigma, delta_rule_target, write_mask):

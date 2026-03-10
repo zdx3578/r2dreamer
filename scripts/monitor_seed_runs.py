@@ -10,9 +10,13 @@ if str(ROOT_DIR) not in sys.path:
     sys.path.insert(0, str(ROOT_DIR))
 
 from utils.phase_gates import (
+    DEFAULT_BASELINE_PROFILE,
     evaluate_atari_closed_loop,
     evaluate_atari_task_gate,
+    evaluate_baseline_relative_gate,
     evaluate_phase1b_gate,
+    phase2_baseline_delta,
+    phase2_window_metrics,
     evaluate_phase2_executable_gate,
     evaluate_phase2_gate,
     evaluate_phase2_rollout_gate,
@@ -55,16 +59,6 @@ PEAK_METRICS = {
     "phase2_seven_step_apply_error": {"key": "train/phase2/seven_step_apply_error", "mode": "min"},
     "ret": {"key": "train/ret", "mode": "max"},
 }
-
-BASELINE_WINDOW_METRICS = {
-    "slot_match_mean": {"baseline": 0.5093164443969727, "mode": "max"},
-    "object_interface_mean": {"baseline": 0.6171978712081909, "mode": "max"},
-    "retrieval_agreement_mean": {"baseline": 0.9987801313400269, "mode": "max"},
-    "rule_apply_error_mean": {"baseline": 0.0004358673933893442, "mode": "min"},
-    "ret_mean": {"baseline": 1.0185977280139924, "mode": "max"},
-    "score_mean": {"baseline": 209.0909090909091, "mode": "max"},
-}
-
 
 def _pid_alive(pid: int) -> bool:
     try:
@@ -127,45 +121,6 @@ def _metric_peaks(records):
     return peaks
 
 
-def _window_metrics(phase1b, phase2, phase2_executable, phase2_rollout, atari_task):
-    return {
-        "slot_match_mean": phase1b["summary"]["slot_match_mean"],
-        "object_interface_mean": phase1b["summary"]["object_interface_mean"],
-        "phase2_gate_scale_mean": phase2["summary"]["gate_scale_mean"],
-        "retrieval_agreement_mean": phase2_executable["summary"]["retrieval_agreement_mean"],
-        "rule_apply_error_mean": phase2_executable["summary"]["rule_apply_error_mean"],
-        "two_step_apply_error_mean": phase2_rollout["summary"]["two_step_apply_error_mean"],
-        "four_step_apply_error_mean": phase2_rollout["summary"]["four_step_apply_error_mean"],
-        "seven_step_apply_error_mean": phase2_rollout["summary"]["seven_step_apply_error_mean"],
-        "two_step_memory_conf_mean": phase2_rollout["summary"]["two_step_memory_conf_mean"],
-        "four_step_memory_conf_mean": phase2_rollout["summary"]["four_step_memory_conf_mean"],
-        "seven_step_memory_conf_mean": phase2_rollout["summary"]["seven_step_memory_conf_mean"],
-        "ret_mean": atari_task["summary"]["ret_mean"],
-        "score_mean": atari_task["summary"]["score_mean"],
-        "score_max": atari_task["summary"]["score_max"],
-    }
-
-
-def _baseline_delta(window_metrics):
-    deltas = {}
-    for name, spec in BASELINE_WINDOW_METRICS.items():
-        value = window_metrics.get(name)
-        if not isinstance(value, (int, float)):
-            continue
-        baseline = float(spec["baseline"])
-        mode = spec.get("mode", "max")
-        raw_delta = float(value) - baseline
-        signed_delta = raw_delta if mode != "min" else -raw_delta
-        deltas[name] = {
-            "value": float(value),
-            "baseline": baseline,
-            "raw_delta": raw_delta,
-            "signed_delta": signed_delta,
-            "mode": mode,
-        }
-    return deltas
-
-
 def _write_final_summary(root: Path):
     aggregate = {
         "phase1b_ready": [],
@@ -182,7 +137,7 @@ def _write_final_summary(root: Path):
     }
     peak_values = {name: [] for name in PEAK_METRICS}
     window_values = {}
-    baseline_delta_values = {name: [] for name in BASELINE_WINDOW_METRICS}
+    baseline_delta_values = {}
     best_peaks = {}
     for seed_dir in sorted(root.glob("seed_*")):
         metrics = seed_dir / "metrics.jsonl"
@@ -195,6 +150,7 @@ def _write_final_summary(root: Path):
         phase2_rollout = evaluate_phase2_rollout_gate(records)
         atari_task = evaluate_atari_task_gate(records)
         atari_closed_loop = evaluate_atari_closed_loop(records)
+        baseline_relative = evaluate_baseline_relative_gate(records)
         rows = [json.loads(line) for line in metrics.read_text().splitlines() if line.strip()]
         ready_status = {
             "phase1b_ready": bool(phase1b["ready"]),
@@ -204,10 +160,12 @@ def _write_final_summary(root: Path):
             "phase2_rollout_long_ready": bool(phase2_rollout["checks"]["phase2_rollout_long_ready"]),
             "phase2_rollout_ready": bool(phase2_rollout["ready"]),
             "atari_task_ready": bool(atari_task["ready"]),
+            "baseline_relative_ready": bool(baseline_relative["ready"]),
             "atari_closed_loop_ready": bool(atari_closed_loop["ready"]),
         }
-        window_metrics = _window_metrics(phase1b, phase2, phase2_executable, phase2_rollout, atari_task)
-        baseline_delta = _baseline_delta(window_metrics)
+        window_metrics = phase2_window_metrics(phase1b, phase2_executable, phase2_rollout, atari_task)
+        window_metrics["phase2_gate_scale_mean"] = phase2["summary"]["gate_scale_mean"]
+        baseline_delta = phase2_baseline_delta(window_metrics, profile=DEFAULT_BASELINE_PROFILE)
         ret_last = None
         for row in reversed(rows):
             if "train/ret" in row:
@@ -221,6 +179,7 @@ def _write_final_summary(root: Path):
             "phase2_executable": phase2_executable,
             "phase2_rollout": phase2_rollout,
             "atari_task": atari_task,
+            "baseline_relative": baseline_relative,
             "atari_closed_loop": atari_closed_loop,
             "ready_status": ready_status,
             "window_metrics": window_metrics,
@@ -236,6 +195,7 @@ def _write_final_summary(root: Path):
         aggregate["phase2_rollout_long_ready"].append(ready_status["phase2_rollout_long_ready"])
         aggregate["phase2_rollout_ready"].append(ready_status["phase2_rollout_ready"])
         aggregate["atari_task_ready"].append(ready_status["atari_task_ready"])
+        aggregate.setdefault("baseline_relative_ready", []).append(ready_status["baseline_relative_ready"])
         aggregate["atari_closed_loop_ready"].append(ready_status["atari_closed_loop_ready"])
         aggregate["slot_match_mean"].append(phase1b["summary"]["slot_match_mean"])
         aggregate["m_obj_mean"].append(phase1b["summary"]["m_obj_mean"])
@@ -268,6 +228,7 @@ def _write_final_summary(root: Path):
         else False,
         "all_phase2_rollout_ready": all(aggregate["phase2_rollout_ready"]) if aggregate["phase2_rollout_ready"] else False,
         "all_atari_task_ready": all(aggregate["atari_task_ready"]) if aggregate["atari_task_ready"] else False,
+        "all_baseline_relative_ready": all(aggregate["baseline_relative_ready"]) if aggregate["baseline_relative_ready"] else False,
         "all_atari_closed_loop_ready": all(aggregate["atari_closed_loop_ready"]) if aggregate["atari_closed_loop_ready"] else False,
         "slot_match_mean_avg": _safe_mean(aggregate["slot_match_mean"]),
         "m_obj_mean_avg": _safe_mean(aggregate["m_obj_mean"]),

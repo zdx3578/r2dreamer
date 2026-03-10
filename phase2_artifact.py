@@ -29,6 +29,8 @@ class Phase2Artifact:
     memory_conf: torch.Tensor
     memory_weights: torch.Tensor
     memory_top_weight: torch.Tensor
+    memory_prior_scale: torch.Tensor
+    memory_retrieve_temperature: torch.Tensor
     delta_rule_fused: torch.Tensor
     rho_next_pred: torch.Tensor
     fusion_alpha: torch.Tensor

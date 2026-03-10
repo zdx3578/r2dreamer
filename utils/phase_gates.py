@@ -5,6 +5,35 @@ import math
 from pathlib import Path
 
 
+BASELINE_PROFILES = {
+    "exec_v5_30k_b4_alien_2bc36b5": {
+        "slot_match_mean": {"baseline": 0.5093164443969727, "mode": "max"},
+        "object_interface_mean": {"baseline": 0.6171978712081909, "mode": "max"},
+        "retrieval_agreement_mean": {"baseline": 0.9987801313400269, "mode": "max"},
+        "rule_apply_error_mean": {"baseline": 0.0004358673933893442, "mode": "min"},
+        "ret_mean": {"baseline": 1.0185977280139924, "mode": "max"},
+        "score_mean": {"baseline": 209.0909090909091, "mode": "max"},
+    },
+    "rollout_v2_30k_b4_alien_304f8ba": {
+        "slot_match_mean": {"baseline": 0.5093248963356019, "mode": "max"},
+        "object_interface_mean": {"baseline": 0.6185529708862305, "mode": "max"},
+        "retrieval_agreement_mean": {"baseline": 0.9918229460716248, "mode": "max"},
+        "rule_apply_error_mean": {"baseline": 0.0003354866232257336, "mode": "min"},
+        "ret_mean": {"baseline": 1.0176645517349243, "mode": "max"},
+        "score_mean": {"baseline": 216.0, "mode": "max"},
+    },
+}
+DEFAULT_BASELINE_PROFILE = "rollout_v2_30k_b4_alien_304f8ba"
+BASELINE_SIGNOFF_THRESHOLDS = {
+    "slot_match_mean": -0.002,
+    "object_interface_mean": -0.01,
+    "retrieval_agreement_mean": -0.01,
+    "rule_apply_error_mean": -2e-4,
+    "ret_mean": -0.02,
+    "score_mean": -15.0,
+}
+
+
 def load_metrics_records(path):
     records = []
     with open(path, "r", encoding="utf-8") as handle:
@@ -54,6 +83,47 @@ def _finite_required(records, keys):
         if not values:
             return False
     return True
+
+
+def phase2_window_metrics(phase1b, phase2_executable, phase2_rollout, atari_task):
+    return {
+        "slot_match_mean": phase1b["summary"]["slot_match_mean"],
+        "object_interface_mean": phase1b["summary"]["object_interface_mean"],
+        "retrieval_agreement_mean": phase2_executable["summary"]["retrieval_agreement_mean"],
+        "rule_apply_error_mean": phase2_executable["summary"]["rule_apply_error_mean"],
+        "two_step_apply_error_mean": phase2_rollout["summary"]["two_step_apply_error_mean"],
+        "four_step_apply_error_mean": phase2_rollout["summary"]["four_step_apply_error_mean"],
+        "seven_step_apply_error_mean": phase2_rollout["summary"]["seven_step_apply_error_mean"],
+        "two_step_memory_conf_mean": phase2_rollout["summary"]["two_step_memory_conf_mean"],
+        "four_step_memory_conf_mean": phase2_rollout["summary"]["four_step_memory_conf_mean"],
+        "seven_step_memory_conf_mean": phase2_rollout["summary"]["seven_step_memory_conf_mean"],
+        "ret_mean": atari_task["summary"]["ret_mean"],
+        "score_mean": atari_task["summary"]["score_mean"],
+        "score_max": atari_task["summary"]["score_max"],
+    }
+
+
+def phase2_baseline_delta(window_metrics, profile=DEFAULT_BASELINE_PROFILE):
+    baseline_profile = BASELINE_PROFILES.get(profile)
+    if baseline_profile is None:
+        raise KeyError(f"Unknown baseline profile: {profile}")
+    deltas = {}
+    for name, spec in baseline_profile.items():
+        value = window_metrics.get(name)
+        if not isinstance(value, (int, float)):
+            continue
+        baseline = float(spec["baseline"])
+        mode = spec.get("mode", "max")
+        raw_delta = float(value) - baseline
+        signed_delta = raw_delta if mode != "min" else -raw_delta
+        deltas[name] = {
+            "value": float(value),
+            "baseline": baseline,
+            "raw_delta": raw_delta,
+            "signed_delta": signed_delta,
+            "mode": mode,
+        }
+    return deltas
 
 
 def evaluate_phase1a_gate(records, window=5):
@@ -358,6 +428,7 @@ def evaluate_phase2_rollout_long_gate(records, window=5, slot_count=8):
     two_step = evaluate_phase2_rollout_two_step_gate(records, window=window, slot_count=slot_count)
     required = [
         "train/loss/four_step_apply",
+        "train/phase2/four_step_curriculum_scale",
         "train/phase2/four_step_memory_conf",
         "train/phase2/four_step_retrieval_agreement",
         "train/phase2/four_step_apply_error",
@@ -367,6 +438,7 @@ def evaluate_phase2_rollout_long_gate(records, window=5, slot_count=8):
         "train/phase2/seven_step_apply_error",
     ]
     has_required = _finite_required(records, required)
+    four_step_curriculum_scale = _recent_values(records, "train/phase2/four_step_curriculum_scale", window)
     four_step_gate_scale = _recent_values(records, "train/phase2/four_step_gate_scale", window)
     four_step_memory_conf = _recent_values(records, "train/phase2/four_step_memory_conf", window)
     four_step_retrieval_agreement = _recent_values(records, "train/phase2/four_step_retrieval_agreement", window)
@@ -377,6 +449,7 @@ def evaluate_phase2_rollout_long_gate(records, window=5, slot_count=8):
     seven_step_apply_error = _recent_values(records, "train/phase2/seven_step_apply_error", window)
     seven_step_fused_delta_rule_abs = _recent_values(records, "train/phase2/seven_step_fused_delta_rule_abs", window)
 
+    four_step_curriculum_active = bool(four_step_curriculum_scale and _mean(four_step_curriculum_scale) > 0.0)
     four_step_gate_open = bool(four_step_gate_scale and _mean(four_step_gate_scale) > 0.0)
     four_step_memory_confident = bool(four_step_memory_conf and _mean(four_step_memory_conf) > 0.05)
     four_step_retrieval_nontrivial = bool(four_step_retrieval_agreement and _mean(four_step_retrieval_agreement) > 0.55)
@@ -389,6 +462,7 @@ def evaluate_phase2_rollout_long_gate(records, window=5, slot_count=8):
     checks = {
         "phase2_rollout_two_step_ready": two_step["ready"],
         "has_required_metrics": has_required,
+        "four_step_curriculum_active": four_step_curriculum_active,
         "four_step_gate_open": four_step_gate_open,
         "four_step_memory_confident": four_step_memory_confident,
         "four_step_retrieval_nontrivial": four_step_retrieval_nontrivial,
@@ -403,6 +477,7 @@ def evaluate_phase2_rollout_long_gate(records, window=5, slot_count=8):
         "ready": all(checks.values()),
         "checks": checks,
         "summary": {
+            "four_step_curriculum_scale_mean": _mean(four_step_curriculum_scale),
             "four_step_gate_scale_mean": _mean(four_step_gate_scale),
             "four_step_memory_conf_mean": _mean(four_step_memory_conf),
             "four_step_retrieval_agreement_mean": _mean(four_step_retrieval_agreement),
@@ -488,14 +563,46 @@ def evaluate_atari_task_gate(records, window=10, score_window=20):
     }
 
 
-def evaluate_atari_closed_loop(records, window=5, task_window=10, score_window=20, slot_count=8):
+def evaluate_baseline_relative_gate(records, window=5, task_window=10, score_window=20, slot_count=8, profile=DEFAULT_BASELINE_PROFILE):
+    phase1b = evaluate_phase1b_gate(records, window=window, slot_count=slot_count)
+    phase2_executable = evaluate_phase2_executable_gate(records, window=window, slot_count=slot_count)
+    phase2_rollout = evaluate_phase2_rollout_gate(records, window=window, slot_count=slot_count)
+    atari_task = evaluate_atari_task_gate(records, window=task_window, score_window=score_window)
+    window_metrics = phase2_window_metrics(phase1b, phase2_executable, phase2_rollout, atari_task)
+    baseline_delta = phase2_baseline_delta(window_metrics, profile=profile)
+    checks = {}
+    for name, threshold in BASELINE_SIGNOFF_THRESHOLDS.items():
+        checks[f"{name}_within_budget"] = bool(name in baseline_delta and baseline_delta[name]["signed_delta"] >= threshold)
+    return {
+        "phase": "baseline_relative",
+        "ready": all(checks.values()) if checks else False,
+        "checks": checks,
+        "summary": {
+            "baseline_profile": profile,
+            "window_metrics": window_metrics,
+            "baseline_delta": baseline_delta,
+        },
+        "phase1b": phase1b,
+        "phase2_executable": phase2_executable,
+        "phase2_rollout": phase2_rollout,
+        "atari_task": atari_task,
+    }
+
+
+def evaluate_atari_closed_loop(
+    records, window=5, task_window=10, score_window=20, slot_count=8, profile=DEFAULT_BASELINE_PROFILE
+):
     executable = evaluate_phase2_executable_gate(records, window=window, slot_count=slot_count)
     rollout = evaluate_phase2_rollout_gate(records, window=window, slot_count=slot_count)
     task = evaluate_atari_task_gate(records, window=task_window, score_window=score_window)
+    baseline = evaluate_baseline_relative_gate(
+        records, window=window, task_window=task_window, score_window=score_window, slot_count=slot_count, profile=profile
+    )
     checks = {
         "phase2_executable_ready": executable["ready"],
         "phase2_rollout_ready": rollout["ready"],
         "task_ready": task["ready"],
+        "baseline_relative_ready": baseline["ready"],
     }
     return {
         "phase": "atari_closed_loop",
@@ -505,6 +612,7 @@ def evaluate_atari_closed_loop(records, window=5, task_window=10, score_window=2
             "phase2_gate_scale_mean": executable["phase2"]["summary"]["gate_scale_mean"],
             "phase2_rollout_two_step_ready": rollout["checks"]["phase2_rollout_two_step_ready"],
             "phase2_rollout_long_ready": rollout["checks"]["phase2_rollout_long_ready"],
+            "baseline_profile": profile,
             "ret_mean": task["summary"]["ret_mean"],
             "score_mean": task["summary"]["score_mean"],
             "score_max": task["summary"]["score_max"],
@@ -512,6 +620,7 @@ def evaluate_atari_closed_loop(records, window=5, task_window=10, score_window=2
         "phase2_executable": executable,
         "phase2_rollout": rollout,
         "task": task,
+        "baseline_relative": baseline,
     }
 
 
@@ -531,6 +640,7 @@ def _main():
             "phase2_rollout_long",
             "phase2_rollout",
             "atari_task",
+            "baseline_relative",
             "atari_closed_loop",
         ],
         default="phase1b",
@@ -539,6 +649,7 @@ def _main():
     parser.add_argument("--task-window", type=int, default=10)
     parser.add_argument("--score-window", type=int, default=20)
     parser.add_argument("--slot-count", type=int, default=8)
+    parser.add_argument("--baseline-profile", default=DEFAULT_BASELINE_PROFILE, choices=sorted(BASELINE_PROFILES))
     args = parser.parse_args()
 
     records = load_metrics_records(args.metrics_path)
@@ -556,6 +667,15 @@ def _main():
         result = evaluate_phase2_rollout_gate(records, window=args.window, slot_count=args.slot_count)
     elif args.phase == "atari_task":
         result = evaluate_atari_task_gate(records, window=args.task_window, score_window=args.score_window)
+    elif args.phase == "baseline_relative":
+        result = evaluate_baseline_relative_gate(
+            records,
+            window=args.window,
+            task_window=args.task_window,
+            score_window=args.score_window,
+            slot_count=args.slot_count,
+            profile=args.baseline_profile,
+        )
     elif args.phase == "atari_closed_loop":
         result = evaluate_atari_closed_loop(
             records,
@@ -563,6 +683,7 @@ def _main():
             task_window=args.task_window,
             score_window=args.score_window,
             slot_count=args.slot_count,
+            profile=args.baseline_profile,
         )
     else:
         result = evaluate_phase1b_gate(records, window=args.window, slot_count=args.slot_count)
