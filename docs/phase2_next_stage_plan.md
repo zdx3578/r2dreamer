@@ -96,91 +96,107 @@ What was missing and is now the active upgrade path:
 - `atari_closed_loop` previously only checked `phase2_ready + task_ready`
 - monitoring leaned too heavily on peak metrics for rollout sign-off
 
-## Current Four-Step Plan
+## Recent Verification Results
 
-The old Step 1-5 sequence should now be treated as history.
-The current Phase2 workstream is the narrower four-step plan below.
+The four-step implementation plan has now effectively landed.
+Recent verification changed the meaning of "next stage":
 
-### 1. RuleMemory Freshness
+- the new `7k` verification already passes `phase2_executable`, `phase2_rollout`, and `atari_closed_loop`
+- the new `30k` verification reached the `23k+` region with strong structure metrics before the run exited early
+- the active rerun is therefore a benchmark closure task, not a feature implementation task
 
-Goal:
+The most important interpretation point is:
 
-- make retrieval prefer recently supported cells instead of permanently favoring old high-write cells
+- low `two/four/seven-step apply_error` is good
 
-Implementation direction:
+Why this is good:
 
-- keep `usage_count` and `write_mass` as lifetime monitoring statistics
-- add freshness-aware support such as `support_ema`
-- use freshness-aware support for retrieval validity and retrieval prior
-- keep prototype correction separate from retrieval support
+- it means the rule path can be applied repeatedly without obvious compounding error
+- it means adding light `four_step_apply` training did not destabilize rollout
+- it is exactly the signal we wanted from the current `rho`-shadow rollout stage
 
-Expected files:
+What it does not prove by itself:
 
-- `rule_memory.py`
-- `dreamer.py`
-- `configs/model/_base_.yaml`
-- `tests/test_phase2_rule_execution.py`
+- it does not yet prove task uplift over the Atari baseline
+- it does not yet prove full structured or full latent rollout, because the current rollout is still `rho`-only and teacher-forced on the rest of the path
 
-### 2. Rollout Gate Upgrade
+The latest partial `30k` readout before the aborted run was already structurally strong:
 
-Goal:
+- `slot_match_mean ~= 0.509`
+- `object_interface_mean ~= 0.614`
+- `retrieval_agreement_mean ~= 0.990`
+- `rule_apply_error_mean ~= 6.0e-4`
+- `two_step_apply_error_mean ~= 7.6e-4`
+- `four_step_apply_error_mean ~= 1.26e-3`
+- `seven_step_apply_error_mean ~= 2.53e-3`
 
-- stop treating rollout readiness as "two-step only"
+The remaining uncertainty is task-side, not structure-side:
 
-Implementation direction:
+- `ret_mean` and `score_mean` were still slightly below the executable reference baseline at that point
+- the run itself exited before `30k`, so the benchmark is incomplete
 
-- split rollout readiness into:
-  - `phase2_rollout_two_step_ready`
-  - `phase2_rollout_long_ready`
-- keep `phase2_rollout.ready` as the combined sign-off
-- require `four_step_*` to be healthy for long-horizon readiness
-- require `seven_step_apply_error` to stay bounded instead of only logging it
+## Current Stage Shift
 
-Expected files:
+The old Step 1-5 sequence is history.
+The four-step implementation plan is now also mostly history.
 
-- `utils/phase_gates.py`
-- `tests/test_phase_gates.py`
+The current Phase2 question is no longer:
 
-### 3. Four-Step Training
+- can Phase2 execute?
+- can Phase2 do longer rollout?
 
-Goal:
+The current question is:
 
-- move long-horizon rollout from monitor-only toward a light curriculum
+- can the new Phase2 stack finish a clean `30k` benchmark reproducibly?
+- after a full benchmark, is Atari task performance at parity with or better than the reference baseline?
 
-Implementation direction:
+## Benchmark Closure Plan
 
-- keep `two_step_apply` as the dominant rollout training loss
-- add `four_step_apply` with a small loss weight
-- keep `seven_step` monitor-only for now
-
-Expected files:
-
-- `dreamer.py`
-- `configs/model/_base_.yaml`
-- `tests/test_phase1a.py`
-
-### 4. Closed-Loop And Monitor Upgrade
+### 1. Finish A Clean 30k Rerun
 
 Goal:
 
-- make rollout and executable quality part of Atari sign-off
-- make end-window behavior more important than isolated peaks
+- obtain one complete `30k` benchmark with the current freshness-aware, multi-horizon-gated codepath
+
+Why this is first:
+
+- the model-side changes are already informative enough
+- without a complete `30k`, the current branch cannot be signed off as either a success or a regression
+
+### 2. Promote Run Completeness To A First-Class Requirement
+
+Goal:
+
+- treat early process exit as a benchmark failure even when the intermediate metrics look good
 
 Implementation direction:
 
-- upgrade `atari_closed_loop` to require:
-  - `phase2_executable_ready`
-  - `phase2_rollout_ready`
-  - `task_ready`
-- keep peak summaries, but stop treating them as the main rollout decision signal
-- add end-window summaries and baseline-relative deltas to monitoring
+- record and inspect run completion explicitly
+- treat truncated `metrics.jsonl` as an incomplete benchmark
+- debug runner stability before making more model-side changes if the rerun fails again
 
-Expected files:
+### 3. Freeze Core Phase2 Structure Until Benchmark Closure
 
-- `utils/phase_gates.py`
-- `scripts/monitor_seed_runs.py`
-- `tests/test_phase_gates.py`
-- `tests/test_monitor_seed_runs.py`
+Goal:
+
+- avoid changing the model while the current benchmark question is still unresolved
+
+This means:
+
+- do not add `seven_step` loss yet
+- do not move to full structured rollout yet
+- do not reopen planner, actor/value, or ARC3 scope yet
+
+### 4. If Full 30k Is Structure-Good But Task-Weaker, Run A Narrow Task-Uplift Sweep
+
+Goal:
+
+- improve task return only after structural stability is confirmed
+
+Preferred order:
+
+- first tune small scalar knobs such as `four_step_apply` weight, freshness decay, and gate/warmup schedule
+- only consider stronger consumers if multiple full `30k` runs still show structural parity but task underperformance
 
 ## Scope Boundaries
 
@@ -223,6 +239,10 @@ Minimum acceptance:
 - `retrieval_agreement_mean >= 0.75`
 - `rule_apply_error_mean <= 0.05`
 
+Status:
+
+- already passed on the new codepath
+
 ### 3. Mid 16k Stability Check
 
 Purpose:
@@ -237,14 +257,20 @@ Minimum acceptance:
 - `retrieval_agreement_mean >= 0.90`
 - `rule_apply_error_mean <= 0.01`
 
+Status:
+
+- structurally satisfied in the aborted `23k+` run
+- still needs one complete run for sign-off
+
 ### 4. Full 30k Benchmark
 
 Purpose:
 
-- verify no regression against the current Atari-only Phase2 baseline
+- verify no regression against the current Atari-only Phase2 baseline on a complete run
 
 Minimum acceptance:
 
+- run reaches the intended `30k` range without early exit
 - `atari_closed_loop.ready = true`
 - `ret_mean >= 0.80`
 - `score_mean >= 150.0`
@@ -256,13 +282,113 @@ Reference baseline:
 - executable baseline: `logdir/verify_exec_v5_30k_b4_alien_2bc36b5`
 - rollout baseline: `logdir/verify_rollout_v2_30k_b4_alien_304f8ba`
 
+### 5. Post-30k Decision Gate
+
+Decision outcomes:
+
+- if structure is healthy and task is at parity or better, freeze this branch as the new Atari-only Phase2 baseline
+- if structure is healthy but task is still weaker, move to a narrow task-uplift sweep
+- if the run fails again before completion, debug launcher and runtime stability before any further model changes
+
 ## Immediate Execution Order
 
-The current implementation order is:
+The current execution order is:
 
-1. freshness-aware retrieval support
-2. split rollout readiness into two-step and long-horizon
-3. light `four_step_apply` training
-4. tighter closed-loop and monitor summaries
+1. let the active `30k` rerun finish
+2. read final gate results, window means, and baseline deltas
+3. decide whether the branch is benchmark-ready or task-uplift-only
+4. only then decide whether another code change is justified
 
-Planner, actor/value integration, and non-Atari expansion remain explicitly deferred until this four-step loop is stable.
+Planner, actor/value integration, full latent rollout, and non-Atari expansion remain deferred until benchmark closure is complete.
+
+## Post-30k Follow-Up Candidates
+
+This section is intentionally post-benchmark.
+These items should not be treated as immediate work while the active `30k` rerun is still unresolved.
+
+The ordering below reflects the current best integration of:
+
+- the implemented Phase2 codepath
+- the recent `7k` and partial `30k` results
+- the longer-horizon rollout observations
+
+### Candidate 1: Upgrade `four_step_apply` From Static Weight To True Curriculum
+
+Current state:
+
+- `four_step_apply` is already in training
+- the current implementation uses a fixed small weight
+- `two/four/seven-step apply_error` being low is a good sign, not a warning sign
+
+Why this is the first candidate:
+
+- the structure path already looks healthy enough to justify a more explicit training schedule
+- a curriculum is the cleanest next refinement if the full `30k` ends up structurally stable but task gains remain ambiguous
+
+Preferred direction:
+
+- keep `two_step_apply` as the default rollout driver
+- only enable or strengthen `four_step_apply` when `phase2_rollout_two_step_ready` stays stable
+- allow automatic fallback toward two-step dominance if long-horizon metrics degrade
+
+This should be treated as the first post-`30k` model-side change if another code round is needed.
+
+### Candidate 2: Promote Baseline-Relative Metrics Into Closed-Loop Sign-Off
+
+Current state:
+
+- monitoring already computes baseline-relative deltas
+- readiness gates still primarily answer whether the system is healthy and runnable
+
+Why this matters:
+
+- the next decision is no longer only "can it run?"
+- the next decision is "is this branch at parity with or better than the current Atari-only reference?"
+
+Preferred direction:
+
+- keep the current structural readiness checks
+- add a separate baseline-relative decision layer for task and rollout value
+- avoid turning this into an overly strict gate before one complete `30k` rerun is available
+
+This should be the second post-`30k` refinement if the branch is structurally sound but benchmark value is still unclear.
+
+### Candidate 3: Improve Retrieval Prior Calibration
+
+Current state:
+
+- freshness-aware support is now the right default
+- sparse-memory stages may still over-amplify a small number of active cells
+
+Why this is lower priority:
+
+- the current retrieval path is already good enough to produce healthy executable and rollout metrics
+- this is a quality and calibration refinement, not the main blocker
+
+Preferred direction:
+
+- weaken prior sharpness when occupied support is still sparse
+- consider soft caps or population-aware temperature on retrieval priors
+- keep lifetime stats and freshness stats semantically separate
+
+This should only be touched after the benchmark result clearly justifies another refinement pass.
+
+### Candidate 4: Move From `rho`-Only Shadow Rollout Toward A Rule-Assisted Structured Consumer
+
+Current state:
+
+- today’s rollout is still `rho`-only and teacher-forced on the rest of the path
+- low long-horizon apply error does not mean full structured rollout has already been achieved
+
+Why this is deferred:
+
+- this is no longer a small calibration step
+- it is the first real step toward a more powerful downstream consumer of the rule path
+
+Preferred direction:
+
+- do not jump directly to full latent overwrite
+- first test whether rule outputs can improve structured prediction heads
+- keep planner, actor/value conditioning, and full latent intervention out of scope until this shadow-consumer stage is justified
+
+This is a valid next-stage direction, but only after benchmark closure and after the lighter follow-up candidates above have been evaluated.
