@@ -95,6 +95,9 @@ class Dreamer(nn.Module):
         self.phase2_memory_binding_threshold = float(
             getattr(phase2_cfg, "memory_write_binding_threshold", 0.30 if legacy_write_threshold is None else legacy_write_threshold)
         )
+        self.phase2_memory_write_alignment_threshold = float(getattr(phase2_cfg, "memory_write_alignment_threshold", 0.6))
+        self.phase2_memory_write_apply_error_threshold = float(getattr(phase2_cfg, "memory_write_apply_error_threshold", 0.10))
+        self.phase2_memory_write_delta_threshold = float(getattr(phase2_cfg, "memory_write_delta_threshold", 1e-3))
         self.phase2_memory_agreement_threshold = float(getattr(phase2_cfg, "memory_agreement_threshold", 0.7))
         self.phase2_memory_agreement_delta_threshold = float(getattr(phase2_cfg, "memory_agreement_delta_threshold", 1e-3))
         objectification_cfg = getattr(config, "objectification", None)
@@ -1002,14 +1005,41 @@ class Dreamer(nn.Module):
         }
         return losses, metrics
 
-    def _phase2_memory_update(self, artifact, structured):
+    def _phase2_memory_write_mask(self, artifact, structured):
         event_mask = structured["event_target"] > 0.5
         conf_mask = (artifact.operator_conf >= self.phase2_memory_operator_threshold) & (
             artifact.binding_conf >= self.phase2_memory_binding_threshold
         )
         valid_mask = structured["transition_valid_ratio"] > 0
         gate_mask = artifact.gate.detach() > 0
-        write_mask = event_mask & conf_mask & valid_mask & gate_mask
+        target_delta = structured["target_delta_rho"].detach()
+        target_delta_mean = target_delta.abs().mean(dim=-1, keepdim=True)
+        delta_alignment = F.cosine_similarity(
+            artifact.delta_rule_pred.detach().reshape(-1, artifact.delta_rule_pred.shape[-1]),
+            target_delta.reshape(-1, target_delta.shape[-1]) + 1e-6,
+            dim=-1,
+        ).reshape_as(valid_mask)
+        delta_alignment = 0.5 * (1.0 + delta_alignment)
+        delta_small = target_delta_mean <= self.phase2_memory_write_delta_threshold
+        apply_error = F.smooth_l1_loss(
+            artifact.rho_next_pred.detach(),
+            structured["nxt"]["rho_t"].detach(),
+            reduction="none",
+        ).mean(dim=-1, keepdim=True)
+        quality_mask = (apply_error <= self.phase2_memory_write_apply_error_threshold) & (
+            (delta_alignment >= self.phase2_memory_write_alignment_threshold) | delta_small
+        )
+        write_mask = event_mask & conf_mask & valid_mask & gate_mask & quality_mask
+        return {
+            "write_mask": write_mask,
+            "delta_alignment": delta_alignment,
+            "apply_error": apply_error,
+            "quality_mask": quality_mask,
+        }
+
+    def _phase2_memory_update(self, artifact, structured):
+        write_info = self._phase2_memory_write_mask(artifact, structured)
+        write_mask = write_info["write_mask"]
         with torch.no_grad():
             stats = self.rule_memory.update(
                 artifact.q_u.detach(),
@@ -1019,6 +1049,9 @@ class Dreamer(nn.Module):
                 write_mask.detach(),
             )
         return {
+            "phase2/memory_write_alignment": write_info["delta_alignment"].mean(),
+            "phase2/memory_write_apply_error": write_info["apply_error"].mean(),
+            "phase2/memory_write_quality_rate": write_info["quality_mask"].to(torch.float32).mean(),
             "phase2/rule_memory_write_rate": stats["write_rate"],
             "phase2/rule_memory_usage": stats["usage_fraction"],
             "phase2/rule_memory_entropy": stats["usage_entropy"],

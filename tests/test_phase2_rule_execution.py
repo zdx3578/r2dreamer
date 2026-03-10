@@ -3,6 +3,7 @@ from types import SimpleNamespace
 
 import torch
 
+from dreamer import Dreamer
 from rule_apply import RuleApply
 from rule_memory import RuleMemory
 
@@ -198,6 +199,75 @@ class Phase2RuleExecutionTest(unittest.TestCase):
         self.assertAlmostEqual(float(out["alpha"].item()), expected_alpha, places=5)
         torch.testing.assert_close(out["delta_rule_fused"], torch.tensor([[[expected_alpha, 2.0 - expected_alpha]]]))
         torch.testing.assert_close(out["rho_next_pred"], torch.tensor([[[0.5 + expected_alpha, 3.0 - expected_alpha]]]))
+
+    def test_rule_apply_gate_zero_blocks_memory_effect(self):
+        apply = RuleApply(SimpleNamespace(use_memory_fusion=True))
+        out = apply(
+            rho_t=torch.tensor([[[0.5, 1.0]]]),
+            delta_rule_pred=torch.tensor([[[1.0, 1.0]]]),
+            memory_delta_rule=torch.tensor([[[3.0, 4.0]]]),
+            operator_conf=torch.tensor([[[0.8]]]),
+            binding_conf=torch.tensor([[[0.5]]]),
+            memory_conf=torch.tensor([[[0.9]]]),
+            gate=torch.tensor([[[0.0]]]),
+        )
+
+        torch.testing.assert_close(out["delta_rule_fused"], torch.zeros_like(out["delta_rule_fused"]))
+        torch.testing.assert_close(out["rho_next_pred"], torch.tensor([[[0.5, 1.0]]]))
+
+    def test_phase2_memory_write_gate_rejects_low_quality_predictions(self):
+        helper = SimpleNamespace(
+            phase2_memory_operator_threshold=0.14,
+            phase2_memory_binding_threshold=0.30,
+            phase2_memory_write_alignment_threshold=0.60,
+            phase2_memory_write_apply_error_threshold=0.10,
+            phase2_memory_write_delta_threshold=0.001,
+        )
+        artifact = SimpleNamespace(
+            operator_conf=torch.tensor([[[0.9]]]),
+            binding_conf=torch.tensor([[[0.8]]]),
+            gate=torch.tensor([[[1.0]]]),
+            delta_rule_pred=torch.tensor([[[1.0, -1.0]]]),
+            rho_next_pred=torch.tensor([[[2.0, 0.0]]]),
+        )
+        structured = {
+            "event_target": torch.tensor([[[1.0]]]),
+            "transition_valid_ratio": torch.tensor([[[1.0]]]),
+            "target_delta_rho": torch.tensor([[[-1.0, 1.0]]]),
+            "nxt": {"rho_t": torch.tensor([[[0.0, 2.0]]])},
+        }
+
+        write_info = Dreamer._phase2_memory_write_mask(helper, artifact, structured)
+
+        self.assertFalse(bool(write_info["quality_mask"].item()))
+        self.assertFalse(bool(write_info["write_mask"].item()))
+
+    def test_phase2_memory_write_gate_accepts_high_quality_predictions(self):
+        helper = SimpleNamespace(
+            phase2_memory_operator_threshold=0.14,
+            phase2_memory_binding_threshold=0.30,
+            phase2_memory_write_alignment_threshold=0.60,
+            phase2_memory_write_apply_error_threshold=0.10,
+            phase2_memory_write_delta_threshold=0.001,
+        )
+        artifact = SimpleNamespace(
+            operator_conf=torch.tensor([[[0.9]]]),
+            binding_conf=torch.tensor([[[0.8]]]),
+            gate=torch.tensor([[[1.0]]]),
+            delta_rule_pred=torch.tensor([[[1.0, 0.0]]]),
+            rho_next_pred=torch.tensor([[[1.0, 0.0]]]),
+        )
+        structured = {
+            "event_target": torch.tensor([[[1.0]]]),
+            "transition_valid_ratio": torch.tensor([[[1.0]]]),
+            "target_delta_rho": torch.tensor([[[1.0, 0.0]]]),
+            "nxt": {"rho_t": torch.tensor([[[1.0, 0.0]]])},
+        }
+
+        write_info = Dreamer._phase2_memory_write_mask(helper, artifact, structured)
+
+        self.assertTrue(bool(write_info["quality_mask"].item()))
+        self.assertTrue(bool(write_info["write_mask"].item()))
 
 
 if __name__ == "__main__":

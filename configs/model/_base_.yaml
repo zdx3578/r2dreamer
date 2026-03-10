@@ -82,6 +82,9 @@ phase2:
   warmup_updates: 1000
   memory_write_operator_threshold: 0.14
   memory_write_binding_threshold: 0.30
+  memory_write_alignment_threshold: 0.60
+  memory_write_apply_error_threshold: 0.10
+  memory_write_delta_threshold: 0.001
   memory_retrieve_temperature: 0.5
   memory_usage_logit_scale: 0.5
   memory_conf_logit_scale: 1.0

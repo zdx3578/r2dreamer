@@ -131,6 +131,9 @@ def make_model_config(cnn_keys, mlp_keys, arc3_grid_keys="^$", use_objectificati
                 "match_margin_threshold": 0.02,
                 "memory_write_operator_threshold": 0.14,
                 "memory_write_binding_threshold": 0.30,
+                "memory_write_alignment_threshold": 0.60,
+                "memory_write_apply_error_threshold": 0.10,
+                "memory_write_delta_threshold": 0.001,
                 "memory_retrieve_temperature": 0.5,
                 "memory_usage_logit_scale": 0.5,
                 "memory_conf_logit_scale": 1.0,
@@ -403,6 +406,9 @@ class Phase1ATest(unittest.TestCase):
             self.assertIn("phase2/memory_agreement_error", metrics)
             self.assertIn("phase2/memory_agreement_coverage", metrics)
             self.assertIn("phase2/rule_apply_error", metrics)
+            self.assertIn("phase2/memory_write_alignment", metrics)
+            self.assertIn("phase2/memory_write_apply_error", metrics)
+            self.assertIn("phase2/memory_write_quality_rate", metrics)
             self.assertIn("phase2/rule_memory_write_rate", metrics)
         self.assertEqual(replay.updated[0].shape[:2], first_obs.shape[:2])
         self.assertEqual(replay.updated[1].shape[:2], first_obs.shape[:2])
