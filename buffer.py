@@ -9,12 +9,13 @@ class Buffer:
         self.storage_device = torch.device(config.storage_device)
         self.batch_size = int(config.batch_size)
         self.batch_length = int(config.batch_length)
+        self.max_size = int(config.max_size)
         self.prioritized = bool(getattr(config, "prioritized", False))
         self.priority_eps = float(getattr(config, "priority_eps", 1e-6))
         self.num_eps = 0
         if self.prioritized:
             sampler = PrioritizedSliceSampler(
-                max_capacity=int(config.max_size),
+                max_capacity=self.max_size,
                 alpha=float(getattr(config, "priority_alpha", 0.6)),
                 beta=float(getattr(config, "priority_beta", 0.4)),
                 eps=self.priority_eps,
@@ -29,9 +30,13 @@ class Buffer:
             sampler = SliceSampler(
                 num_slices=self.batch_size, end_key=None, traj_key="episode", truncated_key=None, strict_length=True
             )
-        self._buffer = ReplayBuffer(
-            storage=LazyTensorStorage(max_size=config.max_size, device=self.storage_device, ndim=2),
-            sampler=sampler,
+        self._sampler = sampler
+        self._buffer = self._make_buffer(self.storage_device)
+
+    def _make_buffer(self, storage_device):
+        return ReplayBuffer(
+            storage=LazyTensorStorage(max_size=self.max_size, device=storage_device, ndim=2),
+            sampler=self._sampler,
             prefetch=0,
             batch_size=self.batch_size * (self.batch_length + 1),  # +1 for context
         )
@@ -39,7 +44,19 @@ class Buffer:
     def add_transition(self, data):
         # This is batched data and lifted for storage.
         # (B, ...) -> (B, 1, ...)
-        self._buffer.extend(data.unsqueeze(1))
+        data = data.unsqueeze(1)
+        try:
+            self._buffer.extend(data)
+        except torch.OutOfMemoryError:
+            if self.storage_device.type != "cuda":
+                raise
+            print(
+                "Replay buffer GPU allocation failed; recreating storage on CPU. "
+                "Training will continue with slower replay sampling."
+            )
+            self.storage_device = torch.device("cpu")
+            self._buffer = self._make_buffer(self.storage_device)
+            self._buffer.extend(data.cpu())
 
     def sample(self):
         sample_td, info = self._buffer.sample(return_info=True)

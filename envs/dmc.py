@@ -1,3 +1,5 @@
+import os
+
 import gymnasium as gym
 import numpy as np
 
@@ -6,6 +8,10 @@ class DeepMindControl(gym.Env):
     metadata = {}
 
     def __init__(self, name, action_repeat=1, size=(64, 64), camera=None, seed=0):
+        # Headless training commonly runs without MUJOCO_GL exported.
+        # Prefer EGL by default so the README's default command works on GPU servers.
+        os.environ.setdefault("MUJOCO_GL", "egl")
+
         if name.endswith("_subtle"):
             is_subtle = True
         else:

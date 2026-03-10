@@ -1,3 +1,5 @@
+import os
+
 import gymnasium as gym
 import numpy as np
 
@@ -11,6 +13,9 @@ class MetaWorld(gym.Env):
         camera=None,
         seed=0,
     ):
+        # Match the README recommendation for headless MuJoCo rendering.
+        os.environ.setdefault("MUJOCO_GL", "egl")
+
         import metaworld
 
         self._camera = camera
