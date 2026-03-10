@@ -52,8 +52,8 @@ loss_scales:
   event: 0.5
   reach: 0.25
   goal: 0.25
-  obj_stable: 0.35
-  obj_local: 0.30
+  obj_stable: 0.25
+  obj_local: 0.25
   obj_rel: 0.25
   op_assign: 0.1
   op_top1: 0.05
@@ -156,17 +156,17 @@ objectification:
   identity_temperature: 0.25
   ema_decay: 0.99
   sinkhorn_iters: 10
-  curriculum_updates: 2500
-  obj_stable_early: 0.45
-  obj_local_early: 0.35
-  obj_rel_early: 0.30
+  curriculum_updates: 0
+  obj_stable_early: 0.25
+  obj_local_early: 0.25
+  obj_rel_early: 0.25
   w_match: 1.0
   w_temp: 1.0
   w_smooth: 0.5
   w_cycle: 0.5
   w_contrast: 0.5
-  w_teacher: 0.15
-  w_multistep: 0.10
+  w_teacher: 0.0
+  w_multistep: 0.0
   multistep_offset: 2
   w_sparse: 1.0
   w_conc: 1.0
