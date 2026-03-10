@@ -319,6 +319,7 @@ class Dreamer(nn.Module):
             modules.update({"rule_memory": self.rule_memory, "rule_apply": self.rule_apply})
             self._loss_scales.setdefault("rule_apply", 1.0)
             self._loss_scales.setdefault("two_step_apply", 1.0)
+            self._loss_scales.setdefault("four_step_apply", 1.0)
             self._loss_scales.setdefault("memory_read", 1.0)
             self._loss_scales.setdefault("memory_agreement", 1.0)
         # count number of parameters in each module
@@ -980,6 +981,8 @@ class Dreamer(nn.Module):
             metrics.update(rollout["metrics"])
             if horizon == 2:
                 losses["two_step_apply"] = rollout["loss"]
+            elif horizon == 4:
+                losses["four_step_apply"] = rollout["loss"]
         return losses, metrics
 
     def _phase2_losses(self, artifact, structured):
@@ -1145,7 +1148,9 @@ class Dreamer(nn.Module):
             "phase2/memory_write_quality_rate": write_info["quality_mask"].to(torch.float32).mean(),
             "phase2/rule_memory_write_rate": stats["write_rate"],
             "phase2/rule_memory_usage": stats["usage_fraction"],
+            "phase2/rule_memory_fresh_usage": stats["fresh_usage_fraction"],
             "phase2/rule_memory_entropy": stats["usage_entropy"],
+            "phase2/rule_memory_support_mean": stats["support_mean"],
         }
 
     def _short_horizon_return(self, reward, terminal, disc, horizon):

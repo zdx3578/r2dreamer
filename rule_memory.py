@@ -13,6 +13,8 @@ class RuleMemory(nn.Module):
         self.signature_dim = int(signature_dim)
         self.rule_dim = int(rule_dim)
         self.ema_decay = float(getattr(config, "memory_ema_decay", 0.99))
+        self.support_decay = float(getattr(config, "memory_support_decay", self.ema_decay))
+        self.support_min = float(getattr(config, "memory_support_min", 1e-4))
         self.prototype_decay = float(getattr(config, "memory_prototype_decay", 0.95))
         self.prototype_min_blend = float(getattr(config, "memory_prototype_min_blend", 0.05))
         self.retrieve_temperature = float(getattr(config, "memory_retrieve_temperature", 1.0))
@@ -28,15 +30,16 @@ class RuleMemory(nn.Module):
         )
         self.register_buffer("usage_count", torch.zeros(self.num_operators, self.num_bindings), persistent=True)
         self.register_buffer("write_mass", torch.zeros(self.num_operators, self.num_bindings), persistent=True)
+        self.register_buffer("support_ema", torch.zeros(self.num_operators, self.num_bindings), persistent=True)
         self.register_buffer("ema_conf", torch.zeros(self.num_operators, self.num_bindings), persistent=True)
 
     def retrieve(self, q_u, q_b, q_sigma=None):
         joint = q_u.unsqueeze(-1) * q_b.unsqueeze(-2)
-        valid_cells = (self.write_mass > 0).to(joint.dtype)
+        valid_cells = (self.support_ema > self.support_min).to(joint.dtype)
         joint_logit = torch.log(joint.clamp_min(1e-6))
 
-        usage_prior = torch.log1p(self.write_mass)
-        usage_prior = usage_prior / usage_prior.amax().clamp_min(1.0)
+        support_prior = torch.log1p(self.support_ema)
+        support_prior = support_prior / support_prior.amax().clamp_min(1.0)
         conf_prior = self.ema_conf / self.ema_conf.amax().clamp_min(1e-6)
 
         if q_sigma is None:
@@ -50,7 +53,7 @@ class RuleMemory(nn.Module):
             signature_score = 0.5 * (1.0 + signature_score)
 
         logits = joint_logit
-        logits = logits + self.usage_logit_scale * usage_prior
+        logits = logits + self.usage_logit_scale * support_prior
         logits = logits + self.conf_logit_scale * conf_prior
         logits = logits + self.signature_logit_scale * signature_score
 
@@ -85,6 +88,9 @@ class RuleMemory(nn.Module):
         flat_delta = delta_rule_target.reshape(-1, self.rule_dim)
         flat_mask = write_mask.reshape(-1).bool()
 
+        self.support_ema.mul_(self.support_decay)
+        self.ema_conf.mul_(self.ema_decay)
+
         if flat_mask.any():
             selected_q_u = flat_q_u[flat_mask]
             selected_q_b = flat_q_b[flat_mask]
@@ -115,11 +121,13 @@ class RuleMemory(nn.Module):
                     blend = max(self.prototype_min_blend, min(1.0, blend))
                     self.delta_rule_proto[op_idx, bind_idx].lerp_(delta_mean, blend)
                     self.signature_proto[op_idx, bind_idx].lerp_(sigma_mean, blend)
-                self.ema_conf[op_idx, bind_idx].mul_(self.ema_decay).add_(conf_mean * (1.0 - self.ema_decay))
+                self.ema_conf[op_idx, bind_idx].add_(conf_mean * (1.0 - self.ema_decay))
+                self.support_ema[op_idx, bind_idx].add_(conf_sum * (1.0 - self.support_decay))
                 self.write_mass[op_idx, bind_idx].copy_(new_mass)
                 self.usage_count[op_idx, bind_idx].add_(float(member.sum()))
 
         occupied = (self.write_mass > 0).to(torch.float32)
+        fresh_occupied = (self.support_ema > self.support_min).to(torch.float32)
         usage_fraction = occupied.mean()
         usage_dist = self.write_mass.reshape(-1)
         usage_dist = usage_dist / usage_dist.sum().clamp_min(1e-6)
@@ -128,5 +136,7 @@ class RuleMemory(nn.Module):
         return {
             "write_rate": write_mask.to(torch.float32).mean(),
             "usage_fraction": usage_fraction,
+            "fresh_usage_fraction": fresh_occupied.mean(),
             "usage_entropy": usage_entropy,
+            "support_mean": self.support_ema.mean(),
         }

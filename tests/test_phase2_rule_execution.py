@@ -70,6 +70,57 @@ class Phase2RuleExecutionTest(unittest.TestCase):
         self.assertLess(float(out["memory_delta_rule"][0, 0, 0]), 0.3)
         self.assertGreater(float(out["memory_delta_rule"][0, 0, 1]), 3.7)
 
+    def test_rule_memory_retrieval_prefers_recent_support_over_lifetime_mass(self):
+        memory = RuleMemory(
+            SimpleNamespace(
+                memory_ema_decay=0.5,
+                memory_support_decay=0.5,
+                memory_support_min=0.01,
+                memory_prototype_decay=0.95,
+                memory_retrieve_temperature=0.1,
+                memory_usage_logit_scale=4.0,
+                memory_conf_logit_scale=0.0,
+                memory_signature_logit_scale=0.0,
+            ),
+            num_operators=1,
+            num_bindings=2,
+            signature_dim=2,
+            rule_dim=2,
+        )
+        q_u = torch.tensor([[[1.0]]])
+        q_sigma = torch.tensor([[[1.0, 0.0]]])
+
+        memory.update(
+            q_u,
+            torch.tensor([[[1.0, 0.0]]]),
+            q_sigma,
+            torch.tensor([[[2.0, 0.0]]]),
+            torch.tensor([[[True]]]),
+        )
+        for _ in range(6):
+            memory.update(
+                q_u,
+                torch.tensor([[[1.0, 0.0]]]),
+                q_sigma,
+                torch.tensor([[[0.0, 0.0]]]),
+                torch.tensor([[[False]]]),
+            )
+        memory.update(
+            q_u,
+            torch.tensor([[[0.0, 1.0]]]),
+            q_sigma,
+            torch.tensor([[[0.0, 3.0]]]),
+            torch.tensor([[[True]]]),
+        )
+
+        out = memory.retrieve(q_u, torch.tensor([[[0.5, 0.5]]]))
+
+        self.assertGreater(float(memory.write_mass[0, 0]), 0.0)
+        self.assertLess(float(memory.support_ema[0, 0]), float(memory.support_min))
+        self.assertGreater(float(memory.support_ema[0, 1]), float(memory.support_min))
+        self.assertLess(float(out["memory_delta_rule"][0, 0, 0]), 0.5)
+        self.assertGreater(float(out["memory_delta_rule"][0, 0, 1]), 2.5)
+
     def test_rule_memory_keeps_operator_binding_separated(self):
         memory = RuleMemory(
             SimpleNamespace(memory_ema_decay=0.0, memory_prototype_decay=0.95, memory_retrieve_temperature=1.0),

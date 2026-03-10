@@ -1,255 +1,206 @@
 # Phase2 Next Stage Plan
 
-## Current Baseline
+## Current Status
 
-Phase2 has already moved from "supervision heads only" to a one-step executable rule path inside training:
+Phase2 is no longer at the "supervision heads only" stage.
+The current codebase already has a writable and executable rule path:
 
-`structured state -> Phase2 artifact -> RuleMemory retrieve -> RuleApply fuse -> rho_next_pred -> align with next_rho`
+`structured state -> Phase2 artifact -> RuleMemory retrieve -> RuleApply fuse -> rho_next_pred`
 
-This path is now stable on the current baseline run:
+Two reference runs anchor the current stage:
 
-- Run: `logdir/verify_exec_v5_30k_b4_alien_2bc36b5`
+- executable reference: `logdir/verify_exec_v5_30k_b4_alien_2bc36b5`
+- rollout reference: `logdir/verify_rollout_v2_30k_b4_alien_304f8ba`
+
+The executable reference established that one-step rule execution is stable on Atari:
+
 - `phase2_executable.ready = true`
 - `atari_closed_loop.ready = true`
 - `retrieval_agreement_mean = 0.9987801313400269`
-- `operator_top1_conf_mean = 0.4073645234107971`
-- `binding_top1_conf_mean = 0.7520877480506897`
-- `memory_conf_mean = 0.9569507241249084`
 - `rule_apply_error_mean = 0.0004358673933893442`
-- `slot_match_mean = 0.5093164443969727`
-- `slot_identity_mean = 0.5624032020568848`
-- `object_interface_mean = 0.6171978712081909`
 - `ret_mean = 1.0185977280139924`
 - `score_mean = 209.0909090909091`
-- `score_max = 360.0`
 
-What is done:
+The rollout reference established that longer shadow rollout metrics are already stable enough to move beyond pure monitoring:
 
-- explicit Phase2 artifact exists
-- `operator x binding` RuleMemory exists
-- one-step rule retrieval and fusion exists
-- one-step rule application is trained and monitored
-- executable gate and task gate both pass on the current 30k baseline
+- `phase2_rollout.ready = true`
+- `two_step_apply_error_mean ~= 4.13e-4`
+- `four_step_apply_error_mean ~= 6.54e-4`
+- `seven_step_apply_error_mean ~= 1.25e-3`
+- `ret_mean ~= 1.02`
+- `score_mean = 216.0`
 
-What is still missing:
+## Old Step 1-5 Status
 
-- Phase2 outputs are still mostly consumed by auxiliary losses
-- RuleMemory prototype updates are not truly forgetful yet
-- memory write decisions still depend mostly on confidence, not write quality
-- `gate == 0` does not yet fully neutralize memory influence in `RuleApply`
-- there is no controlled multi-step rollout consumer yet
-- executable metrics and task metrics are not yet summarized together as a regression guard in monitoring
+The previous five-step plan is mostly implemented and should no longer be read as future work.
 
-## Long-Term Roadmap
+### Step 1: RuleMemory Prototype Stabilization
 
-### Phase A: Stable Executable Core
+Status: delivered.
 
-Goal: keep one-step rule execution correct, writable, and correctable.
+What landed:
 
-This phase focuses on:
+- prototype updates are no longer pure cumulative overwrite
+- repeated good writes can correct an early bad prototype
+- lifetime support statistics remain tracked separately from the prototype value
 
-- RuleMemory forgetting and correction
-- write quality gating
-- safe `RuleApply` gate semantics
-- non-regression against the current 30k baseline
+### Step 2: Memory Write Quality Gating
 
-### Phase B: Controlled Inference Consumer
+Status: delivered.
 
-Goal: let the rule interface affect a limited inference path without touching RSSM state transitions, actor, or planner.
+What landed:
 
-This phase focuses on:
+- writes already require confidence
+- writes already require quality filters such as apply error and delta alignment
+- monitor metrics already report write alignment, write apply error, and write quality rate
 
-- shadow rule rollout on the `rho` channel
-- two-step rule execution metrics
-- optional effect-model side conditioning using `delta_rule_fused` or `rho_next_pred`
+### Step 3: RuleApply Gate Semantics
 
-### Phase C: Task Closed Loop
+Status: delivered.
 
-Goal: verify that executable rules help or at least do not harm task learning.
+What landed:
 
-This phase focuses on:
+- `gate == 0` zeros the fused rule delta
+- `rho_next_pred = rho_t` when the gate is off
+- memory does not leak into the apply path when the gate is closed
 
-- tying executable gates to `atari_task` and `atari_closed_loop`
-- adding baseline-relative summaries to monitoring
-- checking that rule improvements do not hide task regressions
+### Step 4: Controlled Rho Rollout Consumer
 
-### Phase D: Multi-Step Symbolic Rollout
+Status: delivered and expanded.
 
-Goal: move from one-step execution to short-horizon symbolic rollout.
+What landed:
 
-This phase is only valid after Phases A-C are stable.
+- shadow rollout now records `2/4/7-step` metrics on the `rho` channel
+- `two_step_apply` is trained
+- `four_step_apply` is now part of training with a small loss weight
+- `seven_step` remains monitor-only
 
-### Phase E: Planner Or Policy Integration
+What is still true:
 
-Goal: allow downstream planning or control to consume rule outputs.
+- this is still a `rho-only` shadow rollout
+- `M_t / O_t / g_t / feat / action` remain teacher-forced
+- this is not yet a full structured or full latent rollout
 
-This phase stays last. It should not start before multi-step rollout is stable.
+### Step 5: Closed-Loop Monitoring
 
-## Accepted And Deferred Decisions
+Status: delivered in basic form and now being tightened.
 
-Accepted now:
+What landed:
 
-- keep the primary RuleMemory index as `operator x binding`
-- keep `signature` as a retrieval aid and stored value, not as a primary key
-- keep the next consumer limited to the `rho` channel
-- keep planner and actor/value integration out of scope for the next stage
-- treat `slot_concentration` as a secondary workstream, not the main blocker for the next Phase2 step
+- seed summaries already report `phase2_executable`, `phase2_rollout`, `atari_task`, and `atari_closed_loop`
+- aggregate summaries already collect readiness flags and peak metrics
 
-Adjusted from v1:
+What was missing and is now the active upgrade path:
 
-- RuleMemory prototypes need explicit forgetting instead of pure cumulative blending
-- memory writes need quality gating, not only confidence gating
-- `phase2_executable` alone is not enough for sign-off; monitoring must also track `atari_closed_loop`
+- rollout readiness was still effectively `two-step ready`
+- `atari_closed_loop` previously only checked `phase2_ready + task_ready`
+- monitoring leaned too heavily on peak metrics for rollout sign-off
 
-Deferred:
+## Current Four-Step Plan
 
-- `operator x binding x signature` multi-prototype memory
-- direct RSSM latent overwrites
-- direct actor/value conditioning
-- planner integration
+The old Step 1-5 sequence should now be treated as history.
+The current Phase2 workstream is the narrower four-step plan below.
 
-## Integrated Next 5-Step Plan
-
-### Step 1: Stabilize RuleMemory Prototypes
+### 1. RuleMemory Freshness
 
 Goal:
 
-- make memory correctable after early bad writes
-- make the prototype update rule match the intended "EMA-like but revisable" behavior
+- make retrieval prefer recently supported cells instead of permanently favoring old high-write cells
 
-Changes:
+Implementation direction:
 
-- split prototype update behavior from support statistics
-- add an explicit prototype forgetting parameter such as `prototype_decay` or `prototype_momentum`
-- keep `write_mass`, `usage_count`, and `ema_conf` as support statistics
-- keep retrieval valid-cell logic based on written support, but stop treating support accumulation as the prototype update rule itself
+- keep `usage_count` and `write_mass` as lifetime monitoring statistics
+- add freshness-aware support such as `support_ema`
+- use freshness-aware support for retrieval validity and retrieval prior
+- keep prototype correction separate from retrieval support
 
 Expected files:
 
 - `rule_memory.py`
-- `configs/model/_base_.yaml`
-- `tests/test_phase2_rule_execution.py`
-
-Required new tests:
-
-- bad early prototype can be corrected by later writes
-- the same cell can move toward a new rule target after repeated better writes
-
-### Step 2: Tighten Memory Write Quality Gates
-
-Goal:
-
-- reduce dirty writes early in training
-
-Changes:
-
-- keep current event and confidence gates
-- add at least one quality condition before final write, chosen from:
-  - `rule_apply_error < threshold`
-  - cosine agreement between `delta_rule_pred` and `target_delta_rho` above threshold
-  - `memory_read_error < threshold`
-- keep writes no-grad and top-1 per sample
-
-Expected files:
-
 - `dreamer.py`
 - `configs/model/_base_.yaml`
 - `tests/test_phase2_rule_execution.py`
 
-Required new tests:
-
-- low-quality samples do not write
-- high-confidence but wrong-direction samples do not write
-
-### Step 3: Fix RuleApply Gate Semantics
+### 2. Rollout Gate Upgrade
 
 Goal:
 
-- ensure `gate == 0` means no rule execution effect
+- stop treating rollout readiness as "two-step only"
 
-Changes:
+Implementation direction:
 
-- when `gate == 0`, prevent memory from affecting the fused delta
-- preferred safe behavior:
-  - `delta_rule_fused = 0`
-  - `rho_next_pred = rho_t`
-- alternative acceptable behavior:
-  - `delta_rule_fused = delta_rule_pred`
-  - memory path is disabled
-
-Expected files:
-
-- `rule_apply.py`
-- `tests/test_phase2_rule_execution.py`
-
-Required new tests:
-
-- gate-off apply does not consume memory
-- gate-off apply leaves `rho_next_pred` unchanged if the chosen design is zero-effect
-
-### Step 4: Add Two-Step Rho Rollout As The First Controlled Consumer
-
-Goal:
-
-- let Phase2 outputs participate in a limited inference path before touching RSSM, actor, or planner
-
-Changes:
-
-- add a two-step shadow rollout on the `rho` channel
-- make `two-step rho rollout` the first concrete implementation of the shadow rollout path
-- add `two_step_apply_error` as the main new executable rollout loss
-- add rollout metrics such as:
-  - `phase2/two_step_apply_error`
-  - `phase2/two_step_delta_rule_abs`
-  - `phase2/two_step_memory_conf`
-- optionally add a small effect-side consumer that sees `delta_rule_fused` or `rho_next_pred` as an auxiliary condition
-- add a new gate such as `phase2_rollout_ready`
+- split rollout readiness into:
+  - `phase2_rollout_two_step_ready`
+  - `phase2_rollout_long_ready`
+- keep `phase2_rollout.ready` as the combined sign-off
+- require `four_step_*` to be healthy for long-horizon readiness
+- require `seven_step_apply_error` to stay bounded instead of only logging it
 
 Expected files:
 
-- `dreamer.py`
-- `phase2_artifact.py`
 - `utils/phase_gates.py`
-- `scripts/monitor_seed_runs.py`
-- `tests/test_phase2_rule_execution.py`
 - `tests/test_phase_gates.py`
 
-Required new tests:
-
-- two-step rollout error is finite and decreases on controlled fixtures
-- gate-off path still does not leak memory into rollout
-
-### Step 5: Tie Executable Rules To Task Closed Loop
+### 3. Four-Step Training
 
 Goal:
 
-- prevent internal Phase2 progress from hiding task regressions
+- move long-horizon rollout from monitor-only toward a light curriculum
 
-Changes:
+Implementation direction:
 
-- extend monitoring to report:
-  - `phase2_executable`
+- keep `two_step_apply` as the dominant rollout training loss
+- add `four_step_apply` with a small loss weight
+- keep `seven_step` monitor-only for now
+
+Expected files:
+
+- `dreamer.py`
+- `configs/model/_base_.yaml`
+- `tests/test_phase1a.py`
+
+### 4. Closed-Loop And Monitor Upgrade
+
+Goal:
+
+- make rollout and executable quality part of Atari sign-off
+- make end-window behavior more important than isolated peaks
+
+Implementation direction:
+
+- upgrade `atari_closed_loop` to require:
+  - `phase2_executable_ready`
   - `phase2_rollout_ready`
-  - `atari_task`
-  - `atari_closed_loop`
-  - baseline-relative summaries versus the current 30k baseline run
-- mark a run healthy only if both rule execution and task signals remain healthy
+  - `task_ready`
+- keep peak summaries, but stop treating them as the main rollout decision signal
+- add end-window summaries and baseline-relative deltas to monitoring
 
 Expected files:
 
-- `scripts/monitor_seed_runs.py`
 - `utils/phase_gates.py`
-- `tests/test_monitor_seed_runs.py`
+- `scripts/monitor_seed_runs.py`
 - `tests/test_phase_gates.py`
+- `tests/test_monitor_seed_runs.py`
 
-Required new tests:
+## Scope Boundaries
 
-- executable-ready but task-bad should fail the combined summary
-- task-good but rollout-bad should fail the combined summary
+Still in scope:
+
+- Atari-only Phase2 stabilization
+- executable rule retrieval
+- freshness-aware memory support
+- short-horizon `rho` rollout
+- monitoring and closed-loop regression guards
+
+Still out of scope:
+
+- planner integration
+- direct actor/value conditioning
+- direct RSSM latent overwrite
+- ARC3 re-expansion
+- full structured or full latent rollout
 
 ## Validation Ladder
-
-The next stage should be validated in this order:
 
 ### 1. Unit And Integration Tests
 
@@ -263,11 +214,12 @@ Must pass before training:
 
 Purpose:
 
-- reject obviously bad memory or gate changes quickly
+- catch obviously bad freshness or rollout changes early
 
 Minimum acceptance:
 
 - `phase2_executable.ready = true`
+- `phase2_rollout_two_step_ready = true`
 - `retrieval_agreement_mean >= 0.75`
 - `rule_apply_error_mean <= 0.05`
 
@@ -275,20 +227,21 @@ Minimum acceptance:
 
 Purpose:
 
-- verify that the mechanism stays stable after the early warmup phase
+- verify that freshness and rollout stay stable after warmup
 
 Minimum acceptance:
 
 - `phase2_executable.ready = true`
+- `phase2_rollout_two_step_ready = true`
+- `phase2_rollout_long_ready = true`
 - `retrieval_agreement_mean >= 0.90`
 - `rule_apply_error_mean <= 0.01`
-- if Step 4 is implemented, `phase2_rollout_ready = true`
 
 ### 4. Full 30k Benchmark
 
 Purpose:
 
-- verify no structural regression against the current reference run
+- verify no regression against the current Atari-only Phase2 baseline
 
 Minimum acceptance:
 
@@ -298,22 +251,18 @@ Minimum acceptance:
 - `slot_match_mean >= 0.45`
 - `rule_apply_error_mean <= 0.01`
 
-Reference baseline to compare against:
+Reference baseline:
 
-- `retrieval_agreement_mean = 0.9987801313400269`
-- `rule_apply_error_mean = 0.0004358673933893442`
-- `ret_mean = 1.0185977280139924`
-- `score_mean = 209.0909090909091`
-- `slot_match_mean = 0.5093164443969727`
+- executable baseline: `logdir/verify_exec_v5_30k_b4_alien_2bc36b5`
+- rollout baseline: `logdir/verify_rollout_v2_30k_b4_alien_304f8ba`
 
 ## Immediate Execution Order
 
-The next implementation turn should follow this exact order:
+The current implementation order is:
 
-1. Step 1: RuleMemory prototype stabilization
-2. Step 2: write quality gating
-3. Step 3: RuleApply gate fix
-4. Step 4: two-step rho rollout, shadow rollout metrics, and rollout gate
-5. Step 5: combined executable plus task monitoring
+1. freshness-aware retrieval support
+2. split rollout readiness into two-step and long-horizon
+3. light `four_step_apply` training
+4. tighter closed-loop and monitor summaries
 
-Planner, actor/value integration, and multi-step symbolic control stay out of scope until all five items above are complete.
+Planner, actor/value integration, and non-Atari expansion remain explicitly deferred until this four-step loop is stable.

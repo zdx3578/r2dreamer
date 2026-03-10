@@ -143,6 +143,7 @@ class MonitorSeedRunsTest(unittest.TestCase):
                 "train/phase2/match_gate_scale": 0.4,
                 "train/loss/rule_apply": 0.05,
                 "train/loss/two_step_apply": 0.03,
+                "train/loss/four_step_apply": 0.015,
                 "train/phase2/operator_top1_conf": 0.55,
                 "train/phase2/binding_top1_conf": 0.31,
                 "train/phase2/memory_conf": 0.22,
@@ -159,11 +160,13 @@ class MonitorSeedRunsTest(unittest.TestCase):
                 "train/phase2/two_step_retrieval_agreement": 0.66,
                 "train/phase2/two_step_apply_error": 0.16,
                 "train/phase2/two_step_fused_delta_rule_abs": 0.06,
+                "train/phase2/four_step_gate_scale": 0.16,
                 "train/phase2/four_step_memory_conf": 0.18,
                 "train/phase2/four_step_retrieval_agreement": 0.60,
                 "train/phase2/four_step_apply_error": 0.21,
+                "train/phase2/four_step_fused_delta_rule_abs": 0.04,
                 "train/phase2/seven_step_memory_conf": 0.13,
-                "train/phase2/seven_step_retrieval_agreement": 0.48,
+                "train/phase2/seven_step_retrieval_agreement": 0.54,
                 "train/phase2/seven_step_apply_error": 0.29,
                 "train/ret": 0.4,
                 "episode/score": 120.0,
@@ -211,6 +214,7 @@ class MonitorSeedRunsTest(unittest.TestCase):
                 "train/phase2/match_gate_scale": 0.5,
                 "train/loss/rule_apply": 0.04,
                 "train/loss/two_step_apply": 0.02,
+                "train/loss/four_step_apply": 0.01,
                 "train/phase2/operator_top1_conf": 0.58,
                 "train/phase2/binding_top1_conf": 0.34,
                 "train/phase2/memory_conf": 0.26,
@@ -227,9 +231,11 @@ class MonitorSeedRunsTest(unittest.TestCase):
                 "train/phase2/two_step_retrieval_agreement": 0.76,
                 "train/phase2/two_step_apply_error": 0.09,
                 "train/phase2/two_step_fused_delta_rule_abs": 0.05,
+                "train/phase2/four_step_gate_scale": 0.21,
                 "train/phase2/four_step_memory_conf": 0.25,
                 "train/phase2/four_step_retrieval_agreement": 0.70,
                 "train/phase2/four_step_apply_error": 0.13,
+                "train/phase2/four_step_fused_delta_rule_abs": 0.04,
                 "train/phase2/seven_step_memory_conf": 0.19,
                 "train/phase2/seven_step_retrieval_agreement": 0.58,
                 "train/phase2/seven_step_apply_error": 0.20,
@@ -267,13 +273,21 @@ class MonitorSeedRunsTest(unittest.TestCase):
         self.assertTrue(seed_summary["phase2_rollout"]["ready"])
         self.assertTrue(seed_summary["atari_task"]["ready"])
         self.assertTrue(seed_summary["atari_closed_loop"]["ready"])
+        self.assertTrue(seed_summary["ready_status"]["phase2_rollout_two_step_ready"])
+        self.assertTrue(seed_summary["ready_status"]["phase2_rollout_long_ready"])
+        self.assertAlmostEqual(seed_summary["window_metrics"]["four_step_apply_error_mean"], 0.17)
+        self.assertAlmostEqual(seed_summary["window_metrics"]["ret_mean"], 0.45)
+        self.assertLess(seed_summary["baseline_delta"]["rule_apply_error_mean"]["signed_delta"], 0.0)
         self.assertEqual(overall_summary["best_peaks"]["slot_match"]["seed"], "seed_0")
         self.assertEqual(overall_summary["best_peaks"]["slot_match"]["step"], 200)
         self.assertAlmostEqual(overall_summary["peak_value_avg"]["slot_match"], 0.31)
         self.assertTrue(overall_summary["all_phase2_executable_ready"])
+        self.assertTrue(overall_summary["all_phase2_rollout_two_step_ready"])
+        self.assertTrue(overall_summary["all_phase2_rollout_long_ready"])
         self.assertTrue(overall_summary["all_phase2_rollout_ready"])
         self.assertTrue(overall_summary["all_atari_task_ready"])
         self.assertTrue(overall_summary["all_atari_closed_loop_ready"])
+        self.assertAlmostEqual(overall_summary["window_metric_avg"]["score_mean"], 150.0)
 
 
 if __name__ == "__main__":

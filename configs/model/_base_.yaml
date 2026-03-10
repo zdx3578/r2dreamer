@@ -70,6 +70,7 @@ loss_scales:
   memory_agreement: 0.05
   rule_apply: 0.1
   two_step_apply: 0.05
+  four_step_apply: 0.01
 
 r2dreamer:
   lambd: 5e-4
@@ -91,6 +92,8 @@ phase2:
   memory_conf_logit_scale: 1.0
   memory_signature_logit_scale: 1.0
   memory_ema_decay: 0.99
+  memory_support_decay: 0.99
+  memory_support_min: 0.0001
   memory_prototype_decay: 0.95
   memory_prototype_min_blend: 0.05
   memory_agreement_threshold: 0.7
