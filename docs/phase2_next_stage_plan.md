@@ -466,3 +466,93 @@ Preferred direction:
 - keep planner, actor/value conditioning, and full latent intervention out of scope until this shadow-consumer stage is justified
 
 This is a valid next-stage direction, but only after benchmark closure and after the lighter follow-up candidates above have been evaluated.
+
+## Integrated Follow-Up Plan
+
+This section folds in the useful parts of later review notes while correcting the parts that no longer match the current codebase.
+
+### Corrections To Outdated Readings
+
+The current repository is not at a "Phase2 supervision heads only" stage.
+
+What is already true in the current code:
+
+- `RuleMemory` exists and is part of the Phase2 path
+- retrieval is already executed during Phase2 forward
+- `RuleApply` already fuses head prediction and memory retrieval
+- `2/4/7-step` `rho` shadow rollout already exists
+- freshness-aware support and rollout gating already exist
+
+So the correct description is:
+
+- Phase2 is already an executable shadow rule interface
+- it is not yet a full structured rollout or a full latent rollout consumer
+
+### What To Keep From The Replay Critique
+
+The replay critique is directionally useful, but it must be phrased precisely.
+
+What is true now:
+
+- the default Atari structured runs still use slice replay
+- there is not yet an event-rich replay sampler
+- there is not yet a freshness-aware replay sampler
+- there is not yet a rollout-curriculum replay sampler
+
+What is also true now:
+
+- replay is not completely naive
+- the code already supports prioritized replay
+- replay priority can already use structure-side signals such as `event_target`, `delta_struct`, and reward magnitude
+
+Interpretation:
+
+- replay organization is still a plausible future lever for reducing seed variance
+- but replay is not the first thing to change while Phase1B robustness is still the clearest bottleneck
+
+### What To Keep From The Phase1A Critique
+
+The strongest useful point from the Phase1A review is that the current `reach` and `goal` heads are still weak structural consumers.
+
+Current limitations:
+
+- `struct_map / struct_obj / struct_global` still behave more like information-preserving bottlenecks than semantic structure supervision
+- `reach` is still closer to a latent-change proxy than an action-conditioned map-reachability head
+- `goal` is still closer to a short-horizon reward proxy than a strong structure-conditioned progress head
+
+Important caveat:
+
+- this does not mean Phase1A is failing
+- it means Phase1A is currently good enough as a warm-start, but not yet a strong structural consumer
+
+### What To Keep From The Phase1B And Binding Critique
+
+The current multi-seed evidence supports the following ordering:
+
+- if `seed2`-style failures persist, keep working on Phase1B / objectification robustness first
+- do not expand `BindingHead` categories just because structure is unstable
+
+Why:
+
+- the observed weak seeds are failing on `slot_match` and `object_interface`
+- they are not failing because the binding vocabulary is obviously too small
+- adding more binding classes now would add complexity without addressing the demonstrated bottleneck
+
+### Updated Priority Order
+
+After the current robustness loop, the preferred next-stage order is:
+
+1. continue Phase1B robustness work until `seed2`-style structure weakness is either fixed or cleanly bounded
+2. only then redesign Phase1A `reach` so it consumes stronger action/effect-conditioned structure signals
+3. if seed variance is still large after Phase1B and reach improvements, evaluate replay upgrades such as event-rich or freshness-aware sampling
+4. keep `BindingHead` category expansion out of scope unless later evidence shows a real binding-capacity bottleneck
+
+### Suggested Reach Redesign Direction
+
+When Phase1A becomes the next active target, the preferred direction is:
+
+- make `reach` consume `feat`, `action`, `M_t`, and `z_eff`
+- optionally add direct conditioning on `delta_map`
+- keep targets proxy-based, but move them closer to map-change or controllable-frontier signals instead of raw latent delta magnitude
+
+This preserves the practical no-external-label setting while making the head more action-conditioned and structurally meaningful.
