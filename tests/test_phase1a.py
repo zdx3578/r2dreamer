@@ -136,6 +136,8 @@ def make_model_config(cnn_keys, mlp_keys, arc3_grid_keys="^$", use_objectificati
                 "memory_conf_logit_scale": 1.0,
                 "memory_signature_logit_scale": 1.0,
                 "memory_ema_decay": 0.99,
+                "memory_prototype_decay": 0.95,
+                "memory_prototype_min_blend": 0.05,
                 "memory_agreement_threshold": 0.7,
                 "memory_agreement_delta_threshold": 0.001,
                 "use_memory_fusion": True,

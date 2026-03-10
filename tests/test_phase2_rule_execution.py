@@ -10,7 +10,7 @@ from rule_memory import RuleMemory
 class Phase2RuleExecutionTest(unittest.TestCase):
     def test_rule_memory_update_and_retrieve(self):
         memory = RuleMemory(
-            SimpleNamespace(memory_ema_decay=0.0, memory_retrieve_temperature=1.0),
+            SimpleNamespace(memory_ema_decay=0.0, memory_prototype_decay=0.95, memory_retrieve_temperature=1.0),
             num_operators=2,
             num_bindings=3,
             signature_dim=3,
@@ -32,7 +32,7 @@ class Phase2RuleExecutionTest(unittest.TestCase):
 
     def test_rule_memory_keeps_first_write_magnitude_with_smoothing_enabled(self):
         memory = RuleMemory(
-            SimpleNamespace(memory_ema_decay=0.99, memory_retrieve_temperature=1.0),
+            SimpleNamespace(memory_ema_decay=0.99, memory_prototype_decay=0.95, memory_retrieve_temperature=1.0),
             num_operators=2,
             num_bindings=2,
             signature_dim=3,
@@ -49,9 +49,29 @@ class Phase2RuleExecutionTest(unittest.TestCase):
         torch.testing.assert_close(out["memory_delta_rule"], delta)
         torch.testing.assert_close(out["memory_signature_proto"], q_sigma)
 
+    def test_rule_memory_can_correct_early_wrong_prototype(self):
+        memory = RuleMemory(
+            SimpleNamespace(memory_ema_decay=0.99, memory_prototype_decay=0.5, memory_retrieve_temperature=1.0),
+            num_operators=1,
+            num_bindings=1,
+            signature_dim=2,
+            rule_dim=2,
+        )
+        q_u = torch.tensor([[[1.0]]])
+        q_b = torch.tensor([[[1.0]]])
+        q_sigma = torch.tensor([[[1.0, 0.0]]])
+
+        memory.update(q_u, q_b, q_sigma, torch.tensor([[[2.0, 0.0]]]), torch.tensor([[[True]]]))
+        for _ in range(4):
+            memory.update(q_u, q_b, q_sigma, torch.tensor([[[0.0, 4.0]]]), torch.tensor([[[True]]]))
+
+        out = memory.retrieve(q_u, q_b, q_sigma)
+        self.assertLess(float(out["memory_delta_rule"][0, 0, 0]), 0.3)
+        self.assertGreater(float(out["memory_delta_rule"][0, 0, 1]), 3.7)
+
     def test_rule_memory_keeps_operator_binding_separated(self):
         memory = RuleMemory(
-            SimpleNamespace(memory_ema_decay=0.0, memory_retrieve_temperature=1.0),
+            SimpleNamespace(memory_ema_decay=0.0, memory_prototype_decay=0.95, memory_retrieve_temperature=1.0),
             num_operators=2,
             num_bindings=3,
             signature_dim=3,
@@ -94,6 +114,7 @@ class Phase2RuleExecutionTest(unittest.TestCase):
         memory = RuleMemory(
             SimpleNamespace(
                 memory_ema_decay=0.0,
+                memory_prototype_decay=0.95,
                 memory_retrieve_temperature=0.1,
                 memory_usage_logit_scale=0.0,
                 memory_conf_logit_scale=0.0,
@@ -144,7 +165,7 @@ class Phase2RuleExecutionTest(unittest.TestCase):
 
     def test_rule_memory_skips_write_when_mask_is_false(self):
         memory = RuleMemory(
-            SimpleNamespace(memory_ema_decay=0.0, memory_retrieve_temperature=1.0),
+            SimpleNamespace(memory_ema_decay=0.0, memory_prototype_decay=0.95, memory_retrieve_temperature=1.0),
             num_operators=2,
             num_bindings=2,
             signature_dim=3,

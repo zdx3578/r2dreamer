@@ -13,6 +13,8 @@ class RuleMemory(nn.Module):
         self.signature_dim = int(signature_dim)
         self.rule_dim = int(rule_dim)
         self.ema_decay = float(getattr(config, "memory_ema_decay", 0.99))
+        self.prototype_decay = float(getattr(config, "memory_prototype_decay", 0.95))
+        self.prototype_min_blend = float(getattr(config, "memory_prototype_min_blend", 0.05))
         self.retrieve_temperature = float(getattr(config, "memory_retrieve_temperature", 1.0))
         self.usage_logit_scale = float(getattr(config, "memory_usage_logit_scale", 0.5))
         self.conf_logit_scale = float(getattr(config, "memory_conf_logit_scale", 0.5))
@@ -102,12 +104,17 @@ class RuleMemory(nn.Module):
                 conf_sum = conf.sum().clamp_min(1e-6)
                 prev_mass = self.write_mass[op_idx, bind_idx]
                 new_mass = prev_mass + conf_sum
-                blend = (conf_sum / new_mass.clamp_min(1e-6)).to(self.delta_rule_proto.dtype)
                 delta_mean = (selected_delta[member] * conf.unsqueeze(-1)).sum(dim=0) / conf_sum
                 sigma_mean = (selected_sigma[member] * conf.unsqueeze(-1)).sum(dim=0) / conf_sum
                 conf_mean = conf.mean()
-                self.delta_rule_proto[op_idx, bind_idx].lerp_(delta_mean, blend)
-                self.signature_proto[op_idx, bind_idx].lerp_(sigma_mean, blend)
+                if float(prev_mass.item()) <= 0.0:
+                    self.delta_rule_proto[op_idx, bind_idx].copy_(delta_mean)
+                    self.signature_proto[op_idx, bind_idx].copy_(sigma_mean)
+                else:
+                    blend = 1.0 - math.pow(self.prototype_decay, float(conf_sum.item()))
+                    blend = max(self.prototype_min_blend, min(1.0, blend))
+                    self.delta_rule_proto[op_idx, bind_idx].lerp_(delta_mean, blend)
+                    self.signature_proto[op_idx, bind_idx].lerp_(sigma_mean, blend)
                 self.ema_conf[op_idx, bind_idx].mul_(self.ema_decay).add_(conf_mean * (1.0 - self.ema_decay))
                 self.write_mass[op_idx, bind_idx].copy_(new_mass)
                 self.usage_count[op_idx, bind_idx].add_(float(member.sum()))
