@@ -741,6 +741,170 @@ class PhaseGateTest(unittest.TestCase):
         self.assertFalse(result["ready"])
         self.assertFalse(result["checks"]["score_mean_within_budget"])
 
+    def test_baseline_relative_gate_accepts_score_uplift_despite_proxy_lag(self):
+        records = [
+            {
+                "train/loss/delta_map": 0.4,
+                "train/loss/delta_obj": 0.5,
+                "train/loss/delta_global": 0.3,
+                "train/loss/event": 0.7,
+                "train/phase1a/map_std": 0.7,
+                "train/phase1a/obj_std": 0.9,
+                "train/phase1a/delta_map_abs": 0.03,
+                "train/phase1a/delta_obj_abs": 0.01,
+                "train/opt/loss": 25.0,
+                "train/loss/obj_stable": 0.4,
+                "train/loss/obj_local": 0.1,
+                "train/loss/obj_rel": 2.2,
+                "train/phase1b/m_obj": 0.38,
+                "train/phase1b/slot_match": 0.51,
+                "train/phase1b/slot_match_random": 0.509,
+                "train/phase1b/slot_match_margin": 0.001,
+                "train/phase1b/slot_cycle": 0.94,
+                "train/phase1b/slot_identity": 0.56,
+                "train/phase1b/slot_concentration": 0.97,
+                "train/phase1b/object_interface": 0.62,
+                "train/phase1b/motif_entropy": 0.9,
+                "train/loss/op_assign": 0.4,
+                "train/loss/op_proto": 0.3,
+                "train/loss/op_reuse": 0.2,
+                "train/loss/bind_ce": 0.2,
+                "train/loss/bind_consistency": 0.0,
+                "train/loss/sig_scope": 0.0,
+                "train/loss/sig_duration": 0.0,
+                "train/loss/sig_impact": 0.0,
+                "train/loss/rule_update": 0.02,
+                "train/loss/rule_apply": 0.05,
+                "train/loss/two_step_apply": 0.03,
+                "train/loss/four_step_apply": 0.01,
+                "train/phase2/four_step_curriculum_scale": 0.01,
+                "train/phase2/operator_entropy": 1.0,
+                "train/phase2/operator_usage_entropy": 1.0,
+                "train/phase2/binding_entropy": 0.46,
+                "train/phase2/signature_std": 0.27,
+                "train/phase2/rule_delta_abs": 0.01,
+                "train/phase2/gate_scale": 0.22,
+                "train/phase2/match_gate_scale": 1.0,
+                "train/phase2/operator_top1_conf": 0.55,
+                "train/phase2/binding_top1_conf": 0.31,
+                "train/phase2/memory_conf": 0.25,
+                "train/phase2/retrieval_agreement": 0.945,
+                "train/phase2/rule_apply_error": 0.00018,
+                "train/phase2/rule_memory_usage": 0.15,
+                "train/phase2/rule_memory_entropy": 0.28,
+                "train/phase2/rule_memory_write_rate": 0.08,
+                "train/phase2/fused_delta_rule_abs": 0.09,
+                "train/phase2/two_step_gate_scale": 0.19,
+                "train/phase2/two_step_memory_conf": 0.24,
+                "train/phase2/two_step_retrieval_agreement": 0.95,
+                "train/phase2/two_step_apply_error": 0.00024,
+                "train/phase2/two_step_fused_delta_rule_abs": 0.05,
+                "train/phase2/four_step_gate_scale": 0.17,
+                "train/phase2/four_step_memory_conf": 0.25,
+                "train/phase2/four_step_retrieval_agreement": 0.95,
+                "train/phase2/four_step_apply_error": 0.00038,
+                "train/phase2/four_step_fused_delta_rule_abs": 0.04,
+                "train/phase2/seven_step_memory_conf": 0.19,
+                "train/phase2/seven_step_retrieval_agreement": 0.95,
+                "train/phase2/seven_step_apply_error": 0.00067,
+                "train/phase2/seven_step_fused_delta_rule_abs": 0.03,
+                "train/ret": 0.78,
+                "episode/score": 235.0,
+                "episode/length": 500.0,
+            }
+            for _ in range(5)
+        ]
+        result = evaluate_baseline_relative_gate(records, window=5, task_window=5, score_window=5, slot_count=8)
+        self.assertTrue(result["checks"]["structure_within_budget"])
+        self.assertTrue(result["checks"]["score_mean_within_budget"])
+        self.assertFalse(result["checks"]["ret_mean_within_budget"])
+        self.assertFalse(result["checks"]["retrieval_agreement_mean_within_budget"])
+        self.assertTrue(result["checks"]["task_within_budget"])
+        self.assertTrue(result["checks"]["proxy_within_budget"])
+        self.assertTrue(result["ready"])
+
+    def test_baseline_relative_gate_accepts_return_parity_when_score_is_noisy(self):
+        records = [
+            {
+                "train/loss/delta_map": 0.4,
+                "train/loss/delta_obj": 0.5,
+                "train/loss/delta_global": 0.3,
+                "train/loss/event": 0.7,
+                "train/phase1a/map_std": 0.7,
+                "train/phase1a/obj_std": 0.9,
+                "train/phase1a/delta_map_abs": 0.03,
+                "train/phase1a/delta_obj_abs": 0.01,
+                "train/opt/loss": 25.0,
+                "train/loss/obj_stable": 0.4,
+                "train/loss/obj_local": 0.1,
+                "train/loss/obj_rel": 2.2,
+                "train/phase1b/m_obj": 0.38,
+                "train/phase1b/slot_match": 0.5094,
+                "train/phase1b/slot_match_random": 0.509,
+                "train/phase1b/slot_match_margin": 0.001,
+                "train/phase1b/slot_cycle": 0.94,
+                "train/phase1b/slot_identity": 0.56,
+                "train/phase1b/slot_concentration": 0.97,
+                "train/phase1b/object_interface": 0.619,
+                "train/phase1b/motif_entropy": 0.9,
+                "train/loss/op_assign": 0.4,
+                "train/loss/op_proto": 0.3,
+                "train/loss/op_reuse": 0.2,
+                "train/loss/bind_ce": 0.2,
+                "train/loss/bind_consistency": 0.0,
+                "train/loss/sig_scope": 0.0,
+                "train/loss/sig_duration": 0.0,
+                "train/loss/sig_impact": 0.0,
+                "train/loss/rule_update": 0.02,
+                "train/loss/rule_apply": 0.05,
+                "train/loss/two_step_apply": 0.03,
+                "train/loss/four_step_apply": 0.01,
+                "train/phase2/four_step_curriculum_scale": 0.01,
+                "train/phase2/operator_entropy": 1.0,
+                "train/phase2/operator_usage_entropy": 1.0,
+                "train/phase2/binding_entropy": 0.46,
+                "train/phase2/signature_std": 0.27,
+                "train/phase2/rule_delta_abs": 0.01,
+                "train/phase2/gate_scale": 0.22,
+                "train/phase2/match_gate_scale": 1.0,
+                "train/phase2/operator_top1_conf": 0.55,
+                "train/phase2/binding_top1_conf": 0.31,
+                "train/phase2/memory_conf": 0.74,
+                "train/phase2/retrieval_agreement": 0.987,
+                "train/phase2/rule_apply_error": 0.00030,
+                "train/phase2/rule_memory_usage": 0.15,
+                "train/phase2/rule_memory_entropy": 0.28,
+                "train/phase2/rule_memory_write_rate": 0.08,
+                "train/phase2/fused_delta_rule_abs": 0.09,
+                "train/phase2/two_step_gate_scale": 0.19,
+                "train/phase2/two_step_memory_conf": 0.74,
+                "train/phase2/two_step_retrieval_agreement": 0.987,
+                "train/phase2/two_step_apply_error": 0.00049,
+                "train/phase2/two_step_fused_delta_rule_abs": 0.05,
+                "train/phase2/four_step_gate_scale": 0.17,
+                "train/phase2/four_step_memory_conf": 0.74,
+                "train/phase2/four_step_retrieval_agreement": 0.987,
+                "train/phase2/four_step_apply_error": 0.00077,
+                "train/phase2/four_step_fused_delta_rule_abs": 0.04,
+                "train/phase2/seven_step_memory_conf": 0.74,
+                "train/phase2/seven_step_retrieval_agreement": 0.987,
+                "train/phase2/seven_step_apply_error": 0.0014,
+                "train/phase2/seven_step_fused_delta_rule_abs": 0.03,
+                "train/ret": 1.00,
+                "episode/score": 186.0,
+                "episode/length": 500.0,
+            }
+            for _ in range(5)
+        ]
+        result = evaluate_baseline_relative_gate(records, window=5, task_window=5, score_window=5, slot_count=8)
+        self.assertTrue(result["checks"]["structure_within_budget"])
+        self.assertFalse(result["checks"]["score_mean_within_budget"])
+        self.assertTrue(result["checks"]["ret_mean_within_budget"])
+        self.assertTrue(result["checks"]["retrieval_agreement_mean_within_budget"])
+        self.assertTrue(result["checks"]["task_within_budget"])
+        self.assertTrue(result["checks"]["proxy_within_budget"])
+        self.assertTrue(result["ready"])
+
 
 if __name__ == "__main__":
     unittest.main()

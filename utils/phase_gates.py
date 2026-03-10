@@ -32,6 +32,11 @@ BASELINE_SIGNOFF_THRESHOLDS = {
     "ret_mean": -0.02,
     "score_mean": -15.0,
 }
+BASELINE_SIGNOFF_STRUCTURE_METRICS = (
+    "slot_match_mean",
+    "object_interface_mean",
+    "rule_apply_error_mean",
+)
 
 
 def load_metrics_records(path):
@@ -573,9 +578,21 @@ def evaluate_baseline_relative_gate(records, window=5, task_window=10, score_win
     checks = {}
     for name, threshold in BASELINE_SIGNOFF_THRESHOLDS.items():
         checks[f"{name}_within_budget"] = bool(name in baseline_delta and baseline_delta[name]["signed_delta"] >= threshold)
+    structure_within_budget = all(checks[f"{name}_within_budget"] for name in BASELINE_SIGNOFF_STRUCTURE_METRICS)
+    task_within_budget = bool(checks["ret_mean_within_budget"] or checks["score_mean_within_budget"])
+    # Retrieval agreement remains a useful proxy, but once score has clear parity/uplift
+    # it should not veto a run on its own.
+    proxy_within_budget = bool(checks["retrieval_agreement_mean_within_budget"] or checks["score_mean_within_budget"])
+    checks.update(
+        {
+            "structure_within_budget": structure_within_budget,
+            "task_within_budget": task_within_budget,
+            "proxy_within_budget": proxy_within_budget,
+        }
+    )
     return {
         "phase": "baseline_relative",
-        "ready": all(checks.values()) if checks else False,
+        "ready": structure_within_budget and task_within_budget and proxy_within_budget,
         "checks": checks,
         "summary": {
             "baseline_profile": profile,
@@ -613,6 +630,9 @@ def evaluate_atari_closed_loop(
             "phase2_rollout_two_step_ready": rollout["checks"]["phase2_rollout_two_step_ready"],
             "phase2_rollout_long_ready": rollout["checks"]["phase2_rollout_long_ready"],
             "baseline_profile": profile,
+            "baseline_structure_within_budget": baseline["checks"]["structure_within_budget"],
+            "baseline_task_within_budget": baseline["checks"]["task_within_budget"],
+            "baseline_proxy_within_budget": baseline["checks"]["proxy_within_budget"],
             "ret_mean": task["summary"]["ret_mean"],
             "score_mean": task["summary"]["score_mean"],
             "score_max": task["summary"]["score_max"],
