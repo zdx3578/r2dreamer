@@ -29,12 +29,24 @@ class Tee(io.TextIOBase):
         # io.TextIOBase requires returning number of characters written.
         # Some streams may return None; we still return len(s).
         for stream in self._streams:
-            stream.write(s)
+            try:
+                if getattr(stream, "closed", False):
+                    continue
+                stream.write(s)
+            except ValueError:
+                # Interpreter shutdown can close the log file before the tee is
+                # flushed; ignore that case so process exit stays clean.
+                continue
         return len(s)
 
     def flush(self):
         for stream in self._streams:
-            stream.flush()
+            try:
+                if getattr(stream, "closed", False):
+                    continue
+                stream.flush()
+            except ValueError:
+                continue
 
     def isatty(self):
         # Preserve tty detection for progress bars etc.

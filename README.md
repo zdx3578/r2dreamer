@@ -8,6 +8,8 @@ Install dependencies. This repository now requires Python 3.12 or newer, and ARC
 
 If you prefer Docker, follow [`docs/docker.md`](docs/docker.md).
 
+For the current Atari structured training command and the serial base-50k benchmark scripts, see [`docs/experiment_entrypoints.md`](docs/experiment_entrypoints.md).
+
 ```bash
 # Installing via a virtual env like uv is recommended.
 pip install -r requirements.txt
