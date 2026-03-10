@@ -135,6 +135,80 @@ The remaining uncertainty is task-side, not structure-side:
 - `ret_mean` and `score_mean` were still slightly below the executable reference baseline at that point
 - the run itself exited before `30k`, so the benchmark is incomplete
 
+## Baseline Hierarchy
+
+To avoid mixing historical anchors with directly comparable structured baselines, use the following baseline tiers.
+
+### Tier 0: Historical Pre-Phase2 Anchor
+
+- commit: `1fadce4`
+- meaning: last convenient repository anchor before the executable Phase2 line existed
+- use: a coarse "before these Phase2 modifications" reference point
+
+Important limitation:
+
+- this is not a direct executable-or-rollout benchmark baseline
+- no dedicated retained `30k` artifact has been identified in the current workspace for this commit
+
+So `1fadce4` should be recorded as the broadest historical baseline, but not used as the primary apples-to-apples benchmark for the current Phase2 reruns.
+
+### Tier 1: Executable Baseline
+
+- commit: `2bc36b5`
+- run: `logdir/verify_exec_v5_30k_b4_alien_2bc36b5`
+- role: best reference for one-step executable rule quality before the newer rollout-stage upgrades
+
+Key reference values:
+
+- `slot_match_mean ~= 0.5093`
+- `object_interface_mean ~= 0.6172`
+- `retrieval_agreement_mean ~= 0.9988`
+- `rule_apply_error_mean ~= 4.36e-4`
+- `ret_mean ~= 1.0186`
+- `score_mean ~= 209.1`
+
+### Tier 2: Rollout Baseline
+
+- commit: `304f8ba`
+- run: `logdir/verify_rollout_v2_30k_b4_alien_304f8ba`
+- role: best direct baseline for the current rollout-stage branch
+
+Key reference values:
+
+- `slot_match_mean ~= 0.5093`
+- `object_interface_mean ~= 0.6186`
+- `retrieval_agreement_mean ~= 0.9918`
+- `rule_apply_error_mean ~= 3.35e-4`
+- `two_step_apply_error_mean ~= 4.13e-4`
+- `four_step_apply_error_mean ~= 6.54e-4`
+- `seven_step_apply_error_mean ~= 1.25e-3`
+- `ret_mean ~= 1.0177`
+- `score_mean = 216.0`
+
+### Tier 3: Current Candidate Branch
+
+- code line: `304f8ba` baseline plus later freshness, gating, and monitor upgrades through `3a74aef`
+- representative rerun: `logdir/verify_rollout_v3_30k_b4_alien_304f8ba_tmux_rerun_20260310_100507`
+
+Current near-`30k` readout:
+
+- `slot_match_mean ~= 0.5096`
+- `object_interface_mean ~= 0.6194`
+- `retrieval_agreement_mean ~= 0.9911`
+- `rule_apply_error_mean ~= 3.42e-4`
+- `two_step_apply_error_mean ~= 4.17e-4`
+- `four_step_apply_error_mean ~= 6.60e-4`
+- `seven_step_apply_error_mean ~= 1.28e-3`
+- `ret_mean ~= 0.9954`
+- `score_mean = 189.0`
+- `score_max = 270.0`
+
+Current interpretation:
+
+- against the rollout baseline, structure is essentially at parity
+- against the executable baseline, structure is still healthy but task return is slightly lower
+- the main remaining question is task-side value, not structural correctness
+
 ## Current Stage Shift
 
 The old Step 1-5 sequence is history.
