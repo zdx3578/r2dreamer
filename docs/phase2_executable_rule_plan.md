@@ -1,5 +1,9 @@
 # Phase2 Executable Rule Interface Plan
 
+This document records the v1 one-step executable interface plan.
+
+For the next-stage roadmap after the one-step path became stable, see `docs/phase2_next_stage_plan.md`.
+
 ## Goal
 
 Make Phase2 executable at one step instead of keeping it as a collection of supervision heads.
