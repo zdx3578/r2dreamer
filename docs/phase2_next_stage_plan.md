@@ -187,7 +187,7 @@ Required new tests:
 - gate-off apply does not consume memory
 - gate-off apply leaves `rho_next_pred` unchanged if the chosen design is zero-effect
 
-### Step 4: Add A Controlled Consumer Through Shadow Rollout
+### Step 4: Add Two-Step Rho Rollout As The First Controlled Consumer
 
 Goal:
 
@@ -196,7 +196,12 @@ Goal:
 Changes:
 
 - add a two-step shadow rollout on the `rho` channel
-- add `two_step_apply_error`
+- make `two-step rho rollout` the first concrete implementation of the shadow rollout path
+- add `two_step_apply_error` as the main new executable rollout loss
+- add rollout metrics such as:
+  - `phase2/two_step_apply_error`
+  - `phase2/two_step_delta_rule_abs`
+  - `phase2/two_step_memory_conf`
 - optionally add a small effect-side consumer that sees `delta_rule_fused` or `rho_next_pred` as an auxiliary condition
 - add a new gate such as `phase2_rollout_ready`
 
@@ -308,7 +313,7 @@ The next implementation turn should follow this exact order:
 1. Step 1: RuleMemory prototype stabilization
 2. Step 2: write quality gating
 3. Step 3: RuleApply gate fix
-4. Step 4: shadow rollout and rollout gate
+4. Step 4: two-step rho rollout, shadow rollout metrics, and rollout gate
 5. Step 5: combined executable plus task monitoring
 
 Planner, actor/value integration, and multi-step symbolic control stay out of scope until all five items above are complete.
