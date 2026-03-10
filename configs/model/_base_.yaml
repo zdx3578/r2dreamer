@@ -70,7 +70,7 @@ loss_scales:
   memory_agreement: 0.05
   rule_apply: 0.1
   two_step_apply: 0.05
-  four_step_apply: 0.01
+  four_step_apply: 0.005
 
 r2dreamer:
   lambd: 5e-4
@@ -91,11 +91,11 @@ phase2:
   memory_usage_logit_scale: 0.5
   memory_conf_logit_scale: 1.0
   memory_signature_logit_scale: 1.0
-  memory_prior_min_population: 4
+  memory_prior_min_population: 2
   memory_prior_soft_cap: 0.75
   memory_sparse_temperature_boost: 1.0
   memory_ema_decay: 0.99
-  memory_support_decay: 0.99
+  memory_support_decay: 0.995
   memory_support_min: 0.0001
   memory_prototype_decay: 0.95
   memory_prototype_min_blend: 0.05
@@ -105,7 +105,7 @@ phase2:
   four_step_curriculum_warmup_updates: 500
   four_step_curriculum_hold_updates: 5
   four_step_curriculum_release_updates: 12
-  four_step_curriculum_ramp_updates: 25
+  four_step_curriculum_ramp_updates: 200
   four_step_curriculum_ema_decay: 0.9
   four_step_curriculum_enable_memory_conf: 0.10
   four_step_curriculum_enable_retrieval: 0.65
