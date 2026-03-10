@@ -9,7 +9,15 @@ ROOT_DIR = Path(__file__).resolve().parents[1]
 if str(ROOT_DIR) not in sys.path:
     sys.path.insert(0, str(ROOT_DIR))
 
-from utils.phase_gates import evaluate_phase1b_gate, evaluate_phase2_executable_gate, evaluate_phase2_gate, load_metrics_records
+from utils.phase_gates import (
+    evaluate_atari_closed_loop,
+    evaluate_atari_task_gate,
+    evaluate_phase1b_gate,
+    evaluate_phase2_executable_gate,
+    evaluate_phase2_gate,
+    evaluate_phase2_rollout_gate,
+    load_metrics_records,
+)
 
 PEAK_METRICS = {
     "slot_match": {"key": "train/phase1b/slot_match", "mode": "max"},
@@ -36,6 +44,9 @@ PEAK_METRICS = {
     "phase2_memory_agreement_error": {"key": "train/phase2/memory_agreement_error", "mode": "min"},
     "phase2_memory_agreement_coverage": {"key": "train/phase2/memory_agreement_coverage", "mode": "max"},
     "phase2_rule_apply_error": {"key": "train/phase2/rule_apply_error", "mode": "min"},
+    "phase2_two_step_memory_conf": {"key": "train/phase2/two_step_memory_conf", "mode": "max"},
+    "phase2_two_step_retrieval_agreement": {"key": "train/phase2/two_step_retrieval_agreement", "mode": "max"},
+    "phase2_two_step_apply_error": {"key": "train/phase2/two_step_apply_error", "mode": "min"},
     "ret": {"key": "train/ret", "mode": "max"},
 }
 
@@ -106,6 +117,9 @@ def _write_final_summary(root: Path):
         "phase1b_ready": [],
         "phase2_ready": [],
         "phase2_executable_ready": [],
+        "phase2_rollout_ready": [],
+        "atari_task_ready": [],
+        "atari_closed_loop_ready": [],
         "slot_match_mean": [],
         "m_obj_mean": [],
         "ret_last": [],
@@ -120,6 +134,9 @@ def _write_final_summary(root: Path):
         phase1b = evaluate_phase1b_gate(records)
         phase2 = evaluate_phase2_gate(records)
         phase2_executable = evaluate_phase2_executable_gate(records)
+        phase2_rollout = evaluate_phase2_rollout_gate(records)
+        atari_task = evaluate_atari_task_gate(records)
+        atari_closed_loop = evaluate_atari_closed_loop(records)
         rows = [json.loads(line) for line in metrics.read_text().splitlines() if line.strip()]
         ret_last = None
         for row in reversed(rows):
@@ -132,6 +149,9 @@ def _write_final_summary(root: Path):
             "phase1b": phase1b,
             "phase2": phase2,
             "phase2_executable": phase2_executable,
+            "phase2_rollout": phase2_rollout,
+            "atari_task": atari_task,
+            "atari_closed_loop": atari_closed_loop,
             "ret_last": ret_last,
             "peaks": peaks,
         }
@@ -139,6 +159,9 @@ def _write_final_summary(root: Path):
         aggregate["phase1b_ready"].append(bool(phase1b["ready"]))
         aggregate["phase2_ready"].append(bool(phase2["ready"]))
         aggregate["phase2_executable_ready"].append(bool(phase2_executable["ready"]))
+        aggregate["phase2_rollout_ready"].append(bool(phase2_rollout["ready"]))
+        aggregate["atari_task_ready"].append(bool(atari_task["ready"]))
+        aggregate["atari_closed_loop_ready"].append(bool(atari_closed_loop["ready"]))
         aggregate["slot_match_mean"].append(phase1b["summary"]["slot_match_mean"])
         aggregate["m_obj_mean"].append(phase1b["summary"]["m_obj_mean"])
         aggregate["ret_last"].append(ret_last)
@@ -157,6 +180,9 @@ def _write_final_summary(root: Path):
         "all_phase1b_ready": all(aggregate["phase1b_ready"]) if aggregate["phase1b_ready"] else False,
         "all_phase2_ready": all(aggregate["phase2_ready"]) if aggregate["phase2_ready"] else False,
         "all_phase2_executable_ready": all(aggregate["phase2_executable_ready"]) if aggregate["phase2_executable_ready"] else False,
+        "all_phase2_rollout_ready": all(aggregate["phase2_rollout_ready"]) if aggregate["phase2_rollout_ready"] else False,
+        "all_atari_task_ready": all(aggregate["atari_task_ready"]) if aggregate["atari_task_ready"] else False,
+        "all_atari_closed_loop_ready": all(aggregate["atari_closed_loop_ready"]) if aggregate["atari_closed_loop_ready"] else False,
         "slot_match_mean_avg": _safe_mean(aggregate["slot_match_mean"]),
         "m_obj_mean_avg": _safe_mean(aggregate["m_obj_mean"]),
         "ret_last_avg": _safe_mean(aggregate["ret_last"]),

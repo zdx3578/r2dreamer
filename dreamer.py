@@ -318,6 +318,7 @@ class Dreamer(nn.Module):
             self.rule_apply = rule_apply.RuleApply(config.phase2)
             modules.update({"rule_memory": self.rule_memory, "rule_apply": self.rule_apply})
             self._loss_scales.setdefault("rule_apply", 1.0)
+            self._loss_scales.setdefault("two_step_apply", 1.0)
             self._loss_scales.setdefault("memory_read", 1.0)
             self._loss_scales.setdefault("memory_agreement", 1.0)
         # count number of parameters in each module
@@ -767,7 +768,10 @@ class Dreamer(nn.Module):
         return early + (scale - early) * progress
 
     def _phase2_gate(self, objectification_out):
-        objectness_score = objectification_out["objectness_score"]
+        if isinstance(objectification_out, dict):
+            objectness_score = objectification_out["objectness_score"]
+        else:
+            objectness_score = objectification_out
         object_gate = torch.clamp(
             (objectness_score.detach() - self.phase2_m_obj_threshold) / max(1e-6, 1.0 - self.phase2_m_obj_threshold),
             0.0,
@@ -831,25 +835,25 @@ class Dreamer(nn.Module):
         impact_target = torch.tanh(reward_mass + global_mass + rule_mass)
         return scope_target, duration_target, impact_target
 
-    def _phase2_forward(self, structured, data):
+    def _phase2_step_forward(self, feat, action, current, z_eff, objectness_score):
         op_out = self.operator_bank(
-            structured["feat_seq"][:, :-1],
-            data["action"],
-            structured["current"]["M_t"],
-            structured["current"]["O_t"],
-            structured["current"]["g_t"],
-            structured["current"]["rho_t"],
-            structured["z_eff"],
+            feat,
+            action,
+            current["M_t"],
+            current["O_t"],
+            current["g_t"],
+            current["rho_t"],
+            z_eff,
         )
         bind_out = self.binding_head(op_out["operator_embed"], op_out["context_embed"])
         sig_out = self.signature_head(op_out["operator_embed"], op_out["context_embed"])
-        rule_out = self.rule_update_head(structured["z_eff"], op_out["operator_embed"], bind_out["q_b"], sig_out["q_sigma"])
+        rule_out = self.rule_update_head(z_eff, op_out["operator_embed"], bind_out["q_b"], sig_out["q_sigma"])
         memory_out = self.rule_memory.retrieve(op_out["q_u"], bind_out["q_b"], sig_out["q_sigma"])
-        gate, object_gate, match_gate, warmup_gate = self._phase2_gate(structured["objectification_out"])
+        gate, object_gate, match_gate, warmup_gate = self._phase2_gate(objectness_score)
         operator_conf, operator_id = op_out["q_u"].max(dim=-1)
         binding_conf, binding_id = bind_out["q_b"].max(dim=-1)
         apply_out = self.rule_apply(
-            structured["current"]["rho_t"],
+            current["rho_t"],
             rule_out["delta_rule"],
             memory_out["memory_delta_rule"],
             operator_conf.unsqueeze(-1),
@@ -890,6 +894,58 @@ class Dreamer(nn.Module):
             match_gate=match_gate,
             warmup_gate=warmup_gate,
         )
+
+    def _phase2_forward(self, structured, data):
+        return self._phase2_step_forward(
+            structured["feat_seq"][:, :-1],
+            data["action"],
+            structured["current"],
+            structured["z_eff"],
+            structured["objectification_out"]["objectness_score"],
+        )
+
+    def _phase2_rollout(self, artifact, structured, data):
+        if artifact.rho_next_pred.shape[1] < 2:
+            return {}, {}
+
+        rollout_current = {
+            "M_t": structured["nxt"]["M_t"][:, :-1],
+            "O_t": structured["nxt"]["O_t"][:, :-1],
+            "g_t": structured["nxt"]["g_t"][:, :-1],
+            "rho_t": artifact.rho_next_pred[:, :-1],
+        }
+        rollout_art = self._phase2_step_forward(
+            structured["feat_seq"][:, 1:-1],
+            data["action"][:, 1:],
+            rollout_current,
+            self.effect_model(structured["feat_seq"][:, 1:-1], data["action"][:, 1:], rollout_current["rho_t"]),
+            structured["objectification_out"]["objectness_score"],
+        )
+        rollout_target = structured["readouts"]["rho_t"][:, 2:]
+        rollout_valid = structured["transition_valid_ratio"][:, 1:] * rollout_art.gate
+        two_step_apply_loss = self._weighted_loss(
+            rollout_art.rho_next_pred,
+            rollout_target,
+            rollout_valid,
+            kind="smooth_l1",
+        )
+        two_step_retrieval_agreement = F.cosine_similarity(
+            rollout_art.delta_rule_pred.reshape(-1, rollout_art.delta_rule_pred.shape[-1]),
+            rollout_art.memory_delta_rule.reshape(-1, rollout_art.memory_delta_rule.shape[-1]) + 1e-6,
+            dim=-1,
+        )
+        two_step_retrieval_agreement = 0.5 * (1.0 + two_step_retrieval_agreement).mean()
+        losses = {
+            "two_step_apply": two_step_apply_loss,
+        }
+        metrics = {
+            "phase2/two_step_gate_scale": rollout_art.gate.mean(),
+            "phase2/two_step_memory_conf": rollout_art.memory_conf.mean(),
+            "phase2/two_step_retrieval_agreement": two_step_retrieval_agreement,
+            "phase2/two_step_apply_error": two_step_apply_loss.detach(),
+            "phase2/two_step_fused_delta_rule_abs": rollout_art.delta_rule_fused.abs().mean(),
+        }
+        return losses, metrics
 
     def _phase2_losses(self, artifact, structured):
         flat_q = artifact.q_u.reshape(-1, artifact.q_u.shape[-1])
@@ -1181,6 +1237,9 @@ class Dreamer(nn.Module):
                 phase2_losses, phase2_metrics = self._phase2_losses(phase2_art, structured)
                 losses.update(phase2_losses)
                 metrics.update(phase2_metrics)
+                rollout_losses, rollout_metrics = self._phase2_rollout(phase2_art, structured, data)
+                losses.update(rollout_losses)
+                metrics.update(rollout_metrics)
                 metrics.update(self._phase2_memory_update(phase2_art, structured))
             replay_priority = self._replay_priorities(structured)
             if replay_priority is not None:

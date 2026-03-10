@@ -69,6 +69,7 @@ loss_scales:
   memory_read: 0.05
   memory_agreement: 0.05
   rule_apply: 0.1
+  two_step_apply: 0.05
 
 r2dreamer:
   lambd: 5e-4

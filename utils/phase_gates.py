@@ -308,6 +308,52 @@ def evaluate_phase2_executable_gate(records, window=5, slot_count=8):
     }
 
 
+def evaluate_phase2_rollout_gate(records, window=5, slot_count=8):
+    executable = evaluate_phase2_executable_gate(records, window=window, slot_count=slot_count)
+    required = [
+        "train/loss/two_step_apply",
+        "train/phase2/two_step_memory_conf",
+        "train/phase2/two_step_retrieval_agreement",
+        "train/phase2/two_step_apply_error",
+        "train/phase2/two_step_fused_delta_rule_abs",
+    ]
+    has_required = _finite_required(records, required)
+    two_step_gate_scale = _recent_values(records, "train/phase2/two_step_gate_scale", window)
+    two_step_memory_conf = _recent_values(records, "train/phase2/two_step_memory_conf", window)
+    two_step_retrieval_agreement = _recent_values(records, "train/phase2/two_step_retrieval_agreement", window)
+    two_step_apply_error = _recent_values(records, "train/phase2/two_step_apply_error", window)
+    two_step_fused_delta_rule_abs = _recent_values(records, "train/phase2/two_step_fused_delta_rule_abs", window)
+
+    rollout_gate_open = bool(two_step_gate_scale and _mean(two_step_gate_scale) > 0.0)
+    rollout_memory_confident = bool(two_step_memory_conf and _mean(two_step_memory_conf) > 0.05)
+    rollout_retrieval_nontrivial = bool(two_step_retrieval_agreement and _mean(two_step_retrieval_agreement) > 0.55)
+    rollout_apply_stable = bool(two_step_apply_error and _mean(two_step_apply_error) < 0.25)
+    rollout_fused_nontrivial = bool(two_step_fused_delta_rule_abs and _mean(two_step_fused_delta_rule_abs) > 1e-4)
+
+    checks = {
+        "phase2_executable_ready": executable["ready"],
+        "has_required_metrics": has_required,
+        "rollout_gate_open": rollout_gate_open,
+        "rollout_memory_confident": rollout_memory_confident,
+        "rollout_retrieval_nontrivial": rollout_retrieval_nontrivial,
+        "rollout_apply_stable": rollout_apply_stable,
+        "rollout_fused_nontrivial": rollout_fused_nontrivial,
+    }
+    return {
+        "phase": "phase2_rollout",
+        "ready": all(checks.values()),
+        "checks": checks,
+        "summary": {
+            "two_step_gate_scale_mean": _mean(two_step_gate_scale),
+            "two_step_memory_conf_mean": _mean(two_step_memory_conf),
+            "two_step_retrieval_agreement_mean": _mean(two_step_retrieval_agreement),
+            "two_step_apply_error_mean": _mean(two_step_apply_error),
+            "two_step_fused_delta_rule_abs_mean": _mean(two_step_fused_delta_rule_abs),
+        },
+        "phase2_executable": executable,
+    }
+
+
 def evaluate_atari_task_gate(records, window=10, score_window=20):
     required = ["train/ret"]
     has_required = _finite_required(records, required)
@@ -387,7 +433,7 @@ def _main():
     parser.add_argument("metrics_path", type=Path)
     parser.add_argument(
         "--phase",
-        choices=["phase1a", "phase1b", "phase2", "phase2_executable", "atari_task", "atari_closed_loop"],
+        choices=["phase1a", "phase1b", "phase2", "phase2_executable", "phase2_rollout", "atari_task", "atari_closed_loop"],
         default="phase1b",
     )
     parser.add_argument("--window", type=int, default=5)
@@ -403,6 +449,8 @@ def _main():
         result = evaluate_phase2_gate(records, window=args.window, slot_count=args.slot_count)
     elif args.phase == "phase2_executable":
         result = evaluate_phase2_executable_gate(records, window=args.window, slot_count=args.slot_count)
+    elif args.phase == "phase2_rollout":
+        result = evaluate_phase2_rollout_gate(records, window=args.window, slot_count=args.slot_count)
     elif args.phase == "atari_task":
         result = evaluate_atari_task_gate(records, window=args.task_window, score_window=args.score_window)
     elif args.phase == "atari_closed_loop":

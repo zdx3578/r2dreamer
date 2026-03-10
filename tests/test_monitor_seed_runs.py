@@ -16,6 +16,9 @@ class MonitorSeedRunsTest(unittest.TestCase):
                 "train/phase2/memory_agreement_error": 0.31,
                 "train/phase2/memory_agreement_coverage": 0.20,
                 "train/phase2/rule_apply_error": 0.22,
+                "train/phase2/two_step_memory_conf": 0.18,
+                "train/phase2/two_step_retrieval_agreement": 0.44,
+                "train/phase2/two_step_apply_error": 0.30,
                 "train/ret": 0.1,
             },
             {
@@ -25,6 +28,9 @@ class MonitorSeedRunsTest(unittest.TestCase):
                 "train/phase2/memory_agreement_error": 0.19,
                 "train/phase2/memory_agreement_coverage": 0.35,
                 "train/phase2/rule_apply_error": 0.18,
+                "train/phase2/two_step_memory_conf": 0.27,
+                "train/phase2/two_step_retrieval_agreement": 0.63,
+                "train/phase2/two_step_apply_error": 0.18,
                 "train/ret": 0.3,
             },
             {
@@ -34,6 +40,9 @@ class MonitorSeedRunsTest(unittest.TestCase):
                 "train/phase2/memory_agreement_error": 0.11,
                 "train/phase2/memory_agreement_coverage": 0.42,
                 "train/phase2/rule_apply_error": 0.12,
+                "train/phase2/two_step_memory_conf": 0.35,
+                "train/phase2/two_step_retrieval_agreement": 0.72,
+                "train/phase2/two_step_apply_error": 0.09,
                 "train/ret": 0.2,
             },
         ]
@@ -51,6 +60,12 @@ class MonitorSeedRunsTest(unittest.TestCase):
         self.assertAlmostEqual(peaks["phase2_memory_agreement_error"]["value"], 0.11)
         self.assertEqual(peaks["phase2_memory_agreement_coverage"]["step"], 300)
         self.assertAlmostEqual(peaks["phase2_memory_agreement_coverage"]["value"], 0.42)
+        self.assertEqual(peaks["phase2_two_step_memory_conf"]["step"], 300)
+        self.assertAlmostEqual(peaks["phase2_two_step_memory_conf"]["value"], 0.35)
+        self.assertEqual(peaks["phase2_two_step_retrieval_agreement"]["step"], 300)
+        self.assertAlmostEqual(peaks["phase2_two_step_retrieval_agreement"]["value"], 0.72)
+        self.assertEqual(peaks["phase2_two_step_apply_error"]["step"], 300)
+        self.assertAlmostEqual(peaks["phase2_two_step_apply_error"]["value"], 0.09)
         self.assertEqual(peaks["ret"]["step"], 200)
         self.assertAlmostEqual(peaks["ret"]["value"], 0.3)
 
@@ -97,6 +112,7 @@ class MonitorSeedRunsTest(unittest.TestCase):
                 "train/phase2/gate_scale": 0.2,
                 "train/phase2/match_gate_scale": 0.4,
                 "train/loss/rule_apply": 0.05,
+                "train/loss/two_step_apply": 0.03,
                 "train/phase2/operator_top1_conf": 0.55,
                 "train/phase2/binding_top1_conf": 0.31,
                 "train/phase2/memory_conf": 0.22,
@@ -108,7 +124,14 @@ class MonitorSeedRunsTest(unittest.TestCase):
                 "train/phase2/rule_memory_entropy": 0.28,
                 "train/phase2/rule_memory_write_rate": 0.08,
                 "train/phase2/fused_delta_rule_abs": 0.09,
+                "train/phase2/two_step_gate_scale": 0.18,
+                "train/phase2/two_step_memory_conf": 0.21,
+                "train/phase2/two_step_retrieval_agreement": 0.66,
+                "train/phase2/two_step_apply_error": 0.16,
+                "train/phase2/two_step_fused_delta_rule_abs": 0.06,
                 "train/ret": 0.4,
+                "episode/score": 120.0,
+                "episode/length": 460.0,
             },
             {
                 "step": 200,
@@ -151,6 +174,7 @@ class MonitorSeedRunsTest(unittest.TestCase):
                 "train/phase2/gate_scale": 0.3,
                 "train/phase2/match_gate_scale": 0.5,
                 "train/loss/rule_apply": 0.04,
+                "train/loss/two_step_apply": 0.02,
                 "train/phase2/operator_top1_conf": 0.58,
                 "train/phase2/binding_top1_conf": 0.34,
                 "train/phase2/memory_conf": 0.26,
@@ -162,7 +186,14 @@ class MonitorSeedRunsTest(unittest.TestCase):
                 "train/phase2/rule_memory_entropy": 0.31,
                 "train/phase2/rule_memory_write_rate": 0.10,
                 "train/phase2/fused_delta_rule_abs": 0.08,
+                "train/phase2/two_step_gate_scale": 0.21,
+                "train/phase2/two_step_memory_conf": 0.29,
+                "train/phase2/two_step_retrieval_agreement": 0.76,
+                "train/phase2/two_step_apply_error": 0.09,
+                "train/phase2/two_step_fused_delta_rule_abs": 0.05,
                 "train/ret": 0.5,
+                "episode/score": 180.0,
+                "episode/length": 480.0,
             },
         ]
 
@@ -191,10 +222,16 @@ class MonitorSeedRunsTest(unittest.TestCase):
         self.assertEqual(seed_summary["peaks"]["phase2_memory_agreement_coverage"]["step"], 200)
         self.assertAlmostEqual(seed_summary["peaks"]["phase2_memory_agreement_coverage"]["value"], 0.55)
         self.assertTrue(seed_summary["phase2_executable"]["ready"])
+        self.assertTrue(seed_summary["phase2_rollout"]["ready"])
+        self.assertTrue(seed_summary["atari_task"]["ready"])
+        self.assertTrue(seed_summary["atari_closed_loop"]["ready"])
         self.assertEqual(overall_summary["best_peaks"]["slot_match"]["seed"], "seed_0")
         self.assertEqual(overall_summary["best_peaks"]["slot_match"]["step"], 200)
         self.assertAlmostEqual(overall_summary["peak_value_avg"]["slot_match"], 0.31)
         self.assertTrue(overall_summary["all_phase2_executable_ready"])
+        self.assertTrue(overall_summary["all_phase2_rollout_ready"])
+        self.assertTrue(overall_summary["all_atari_task_ready"])
+        self.assertTrue(overall_summary["all_atari_closed_loop_ready"])
 
 
 if __name__ == "__main__":

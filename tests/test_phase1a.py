@@ -109,6 +109,7 @@ def make_model_config(cnn_keys, mlp_keys, arc3_grid_keys="^$", use_objectificati
                 "memory_read": 0.1,
                 "memory_agreement": 0.1,
                 "rule_apply": 0.1,
+                "two_step_apply": 0.05,
             },
             "r2dreamer": {"lambd": 5e-4},
             "phase1a": {
@@ -395,6 +396,7 @@ class Phase1ATest(unittest.TestCase):
             self.assertIn("loss/memory_read", metrics)
             self.assertIn("loss/memory_agreement", metrics)
             self.assertIn("loss/rule_apply", metrics)
+            self.assertIn("loss/two_step_apply", metrics)
             self.assertIn("phase2/operator_entropy", metrics)
             self.assertIn("phase2/match_gate_scale", metrics)
             self.assertIn("phase2/operator_top1_conf", metrics)
@@ -406,6 +408,10 @@ class Phase1ATest(unittest.TestCase):
             self.assertIn("phase2/memory_agreement_error", metrics)
             self.assertIn("phase2/memory_agreement_coverage", metrics)
             self.assertIn("phase2/rule_apply_error", metrics)
+            self.assertIn("phase2/two_step_apply_error", metrics)
+            self.assertIn("phase2/two_step_memory_conf", metrics)
+            self.assertIn("phase2/two_step_retrieval_agreement", metrics)
+            self.assertIn("phase2/two_step_fused_delta_rule_abs", metrics)
             self.assertIn("phase2/memory_write_alignment", metrics)
             self.assertIn("phase2/memory_write_apply_error", metrics)
             self.assertIn("phase2/memory_write_quality_rate", metrics)
