@@ -16,6 +16,9 @@ use_operator_bank: False
 use_binding_head: False
 use_signature_head: False
 use_rule_update: False
+use_structure_decoder: False
+use_local_decoder: False
+use_direct_spatial_targets: False
 use_event_pipeline: False
 use_sl_gate: False
 
@@ -50,6 +53,14 @@ loss_scales:
   delta_obj: 1.0
   delta_global: 1.0
   event: 0.5
+  spatial_recon: 0.2
+  region_map: 0.2
+  slot_mask: 0.2
+  local_change: 0.5
+  local_roi: 0.25
+  local_delta: 0.5
+  delta_map_direct: 0.25
+  delta_obj_direct: 0.25
   reach: 0.25
   goal: 0.25
   obj_stable: 0.25
@@ -77,6 +88,9 @@ r2dreamer:
 
 phase1a:
   goal_horizon: 3
+  direct_target_blend: 0.75
+  change_threshold: 0.04
+  roi_pool: 3
 
 phase2:
   m_obj_threshold: 0.2
@@ -137,6 +151,14 @@ effect_model:
   latent_dim: ${model.units}
 
 effect_heads:
+  layers: 1
+  hidden: ${model.units}
+
+structure_decoder:
+  hidden: ${model.units}
+  temperature: 1.0
+
+local_effect_decoder:
   layers: 1
   hidden: ${model.units}
 

@@ -10,6 +10,9 @@ model:
   use_binding_head: True
   use_signature_head: True
   use_rule_update: True
+  use_structure_decoder: True
+  use_local_decoder: True
+  use_direct_spatial_targets: True
 
 buffer:
   prioritized: True

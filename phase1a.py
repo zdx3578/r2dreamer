@@ -303,3 +303,90 @@ class GoalProgressHead(nn.Module):
 
     def forward(self, feat, g_t):
         return self.out(self.trunk(torch.cat([feat, g_t], dim=-1)))
+
+
+class SpatialStructureDecoder(nn.Module):
+    def __init__(self, config, spatial_dim, map_slots, map_dim, obj_slots, obj_dim):
+        super().__init__()
+        self.map_slots = int(map_slots)
+        self.obj_slots = int(obj_slots)
+        self.hidden = int(config.hidden)
+        self.temperature = float(getattr(config, "temperature", 1.0))
+        self.spatial_key = nn.Linear(int(spatial_dim), self.hidden, bias=True)
+        self.map_query = nn.Linear(int(map_dim), self.hidden, bias=True)
+        self.obj_query = nn.Linear(int(obj_dim), self.hidden, bias=True)
+        self.map_value = nn.Linear(int(map_dim), int(spatial_dim), bias=True)
+        self.obj_value = nn.Linear(int(obj_dim), int(spatial_dim), bias=True)
+        self.map_gate = nn.Linear(int(map_dim), 1, bias=True)
+        self.obj_gate = nn.Linear(int(obj_dim), 1, bias=True)
+        self.apply(tools.weight_init_)
+
+    def forward(self, spatial, M_t, O_t):
+        batch_shape = spatial.shape[:-3]
+        height, width, spatial_dim = spatial.shape[-3:]
+        num_tokens = int(height) * int(width)
+        temperature = max(self.temperature, 1e-3)
+
+        token_feat = self.spatial_key(spatial).reshape(*batch_shape, num_tokens, self.hidden)
+        map_query = self.map_query(M_t)
+        obj_query = self.obj_query(O_t)
+        map_gate = self.map_gate(M_t).transpose(-2, -1)
+        obj_gate = self.obj_gate(O_t).transpose(-2, -1)
+
+        map_logits = torch.einsum("...nd,...sd->...ns", token_feat, map_query) / math.sqrt(float(self.hidden))
+        obj_logits = torch.einsum("...nd,...sd->...ns", token_feat, obj_query) / math.sqrt(float(self.hidden))
+        map_logits = map_logits / temperature + map_gate
+        obj_logits = obj_logits / temperature + obj_gate
+
+        map_mask = torch.sigmoid(map_logits)
+        slot_mask = torch.sigmoid(obj_logits)
+        map_weights = map_mask / map_mask.sum(dim=-1, keepdim=True).clamp_min(1e-6)
+        slot_weights = slot_mask / slot_mask.sum(dim=-1, keepdim=True).clamp_min(1e-6)
+
+        map_value = self.map_value(M_t)
+        obj_value = self.obj_value(O_t)
+        map_recon = torch.einsum("...ns,...sd->...nd", map_weights, map_value)
+        obj_recon = torch.einsum("...ns,...sd->...nd", slot_weights, obj_value)
+        spatial_recon = (map_recon + obj_recon).reshape(*batch_shape, height, width, spatial_dim)
+
+        region_logits = torch.logsumexp(map_logits, dim=-1, keepdim=True) - math.log(float(self.map_slots))
+        slot_foreground_logits = torch.logsumexp(obj_logits, dim=-1, keepdim=True) - math.log(float(self.obj_slots))
+        region_logits = region_logits.reshape(*batch_shape, height, width, 1)
+        slot_foreground_logits = slot_foreground_logits.reshape(*batch_shape, height, width, 1)
+        slot_mask_logits = obj_logits.reshape(*batch_shape, height, width, self.obj_slots)
+        map_mask_logits = map_logits.reshape(*batch_shape, height, width, self.map_slots)
+        return {
+            "region_logits": region_logits,
+            "slot_foreground_logits": slot_foreground_logits,
+            "slot_mask_logits": slot_mask_logits,
+            "map_mask_logits": map_mask_logits,
+            "spatial_recon": spatial_recon,
+            "slot_mask": slot_mask_logits.sigmoid(),
+            "region_map": region_logits.sigmoid(),
+        }
+
+
+class LocalEffectDecoder(nn.Module):
+    def __init__(self, config, spatial_dim, latent_dim, act_name, use_norm):
+        super().__init__()
+        self.trunk, out_dim = _build_mlp(int(spatial_dim) + int(latent_dim), int(config.hidden), int(config.layers), act_name, use_norm)
+        self.change = nn.Linear(out_dim, 1, bias=True)
+        self.roi = nn.Linear(out_dim, 1, bias=True)
+        self.delta = nn.Linear(out_dim, 1, bias=True)
+        self.apply(tools.weight_init_)
+
+    def forward(self, spatial, z_eff):
+        batch_shape = spatial.shape[:-3]
+        height, width, channels = spatial.shape[-3:]
+        num_tokens = int(height) * int(width)
+        spatial_tokens = spatial.reshape(*batch_shape, num_tokens, channels)
+        effect_tokens = z_eff.unsqueeze(-2).expand(*batch_shape, num_tokens, z_eff.shape[-1])
+        hidden = self.trunk(torch.cat([spatial_tokens, effect_tokens], dim=-1))
+        change_logits = self.change(hidden).reshape(*batch_shape, height, width, 1)
+        roi_logits = self.roi(hidden).reshape(*batch_shape, height, width, 1)
+        local_delta = F.softplus(self.delta(hidden)).reshape(*batch_shape, height, width, 1)
+        return {
+            "change_logits": change_logits,
+            "roi_logits": roi_logits,
+            "local_delta": local_delta,
+        }
