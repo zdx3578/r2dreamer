@@ -39,6 +39,11 @@ class Dreamer(nn.Module):
         self.return_ema = networks.ReturnEMA(device=self.device)
         self.act_dim = act_space.n if hasattr(act_space, "n") else sum(act_space.shape)
         self.rep_loss = str(config.rep_loss)
+        actor_eval_cfg = getattr(config, "actor_eval", {})
+        self.actor_eval_repeat_calibration = bool(getattr(actor_eval_cfg, "repeat_calibration", True))
+        self.actor_eval_repeat_threshold = max(1, int(getattr(actor_eval_cfg, "repeat_threshold", 8)))
+        self.actor_eval_min_top1_prob = float(getattr(actor_eval_cfg, "min_top1_prob", 0.5))
+        self.actor_eval_min_margin = float(getattr(actor_eval_cfg, "min_margin", 0.15))
 
         # World model components
         shapes = {k: tuple(v.shape) for k, v in obs_space.spaces.items()}
@@ -544,15 +549,27 @@ class Dreamer(nn.Module):
             state["deter"],
             state["prev_action"],
         )
+        prev_repeat = (
+            state["eval_repeat_count"]
+            if "eval_repeat_count" in state.keys()
+            else torch.zeros(state.batch_size[0], dtype=torch.int32, device=self.device)
+        )
+        is_first = obs["is_first"].to(torch.bool).reshape(-1)
+        prev_repeat = torch.where(is_first, torch.zeros_like(prev_repeat), prev_repeat)
+        prev_action_for_repeat = torch.where(is_first.unsqueeze(-1), torch.zeros_like(prev_action), prev_action)
         # (B, S, K), (B, D)
         stoch, deter, _ = self._frozen_rssm.obs_step(prev_stoch, prev_deter, prev_action, embed, obs["is_first"])
         # (B, F)
         feat = self._frozen_rssm.get_feat(stoch, deter)
         action_dist = self._frozen_actor(feat)
         # (B, A)
-        action = action_dist.mode if eval else action_dist.rsample()
+        if eval:
+            action = self._select_eval_action(action_dist, prev_action_for_repeat, prev_repeat)
+        else:
+            action = action_dist.rsample()
+        repeat_count = self._update_eval_repeat_count(action, prev_action_for_repeat, prev_repeat)
         return action, TensorDict(
-            {"stoch": stoch, "deter": deter, "prev_action": action},
+            {"stoch": stoch, "deter": deter, "prev_action": action, "eval_repeat_count": repeat_count},
             batch_size=state.batch_size,
         )
 
@@ -560,7 +577,52 @@ class Dreamer(nn.Module):
     def get_initial_state(self, B):
         stoch, deter = self.rssm.initial(B)
         action = torch.zeros(B, self.act_dim, dtype=torch.float32, device=self.device)
-        return TensorDict({"stoch": stoch, "deter": deter, "prev_action": action}, batch_size=(B,))
+        repeat_count = torch.zeros(B, dtype=torch.int32, device=self.device)
+        return TensorDict(
+            {"stoch": stoch, "deter": deter, "prev_action": action, "eval_repeat_count": repeat_count},
+            batch_size=(B,),
+        )
+
+    @torch.no_grad()
+    def _update_eval_repeat_count(self, action, prev_action, prev_repeat):
+        if not self.act_discrete:
+            return torch.zeros_like(prev_repeat)
+        if action.shape[-1] != prev_action.shape[-1]:
+            return torch.zeros_like(prev_repeat)
+        action_idx = torch.argmax(action.detach(), dim=-1)
+        prev_idx = torch.argmax(prev_action.detach(), dim=-1)
+        same_action = action_idx == prev_idx
+        one = torch.ones_like(prev_repeat)
+        return torch.where(same_action, prev_repeat + 1, one)
+
+    @torch.no_grad()
+    def _select_eval_action(self, action_dist, prev_action, prev_repeat):
+        action = action_dist.mode
+        if not (self.act_discrete and self.actor_eval_repeat_calibration):
+            return action
+        if not isinstance(action_dist, dists.OneHotDist):
+            return action
+        if action.shape[-1] <= 1:
+            return action
+
+        probs = action_dist.probs
+        topk = torch.topk(probs, k=min(2, probs.shape[-1]), dim=-1)
+        top1_prob = topk.values[..., 0]
+        top2_prob = topk.values[..., 1] if topk.values.shape[-1] > 1 else torch.zeros_like(top1_prob)
+        margin = top1_prob - top2_prob
+        low_confidence = (top1_prob < self.actor_eval_min_top1_prob) | (margin < self.actor_eval_min_margin)
+
+        mode_idx = torch.argmax(action.detach(), dim=-1)
+        prev_idx = torch.argmax(prev_action.detach(), dim=-1)
+        repeating = mode_idx == prev_idx
+        over_repeat = prev_repeat >= self.actor_eval_repeat_threshold
+        switch_to_second = low_confidence & repeating & over_repeat
+        if not torch.any(switch_to_second):
+            return action
+
+        second_idx = topk.indices[..., 1]
+        second_action = F.one_hot(second_idx, probs.shape[-1]).to(action.dtype)
+        return torch.where(switch_to_second.unsqueeze(-1), second_action, action)
 
     @torch.no_grad()
     def video_pred(self, data, initial):

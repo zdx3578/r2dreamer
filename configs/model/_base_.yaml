@@ -3,6 +3,11 @@ kl_free: 1.0
 imag_horizon: 15
 horizon: 333
 lamb: 0.95
+actor_eval:
+  repeat_calibration: True
+  repeat_threshold: 8
+  min_top1_prob: 0.5
+  min_margin: 0.15
 compile: True
 log_grads: False
 device: ${device}

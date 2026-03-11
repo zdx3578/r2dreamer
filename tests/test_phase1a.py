@@ -9,6 +9,7 @@ from omegaconf import OmegaConf
 from tensordict import TensorDict
 
 from arc3_grid_encoder import Arc3GridEncoder
+import distributions as dists
 from dreamer import Dreamer
 from utils.slot_matching import soft_slot_alignment
 
@@ -48,6 +49,39 @@ class FakeReplayBuffer:
     def update(self, index, stoch, deter, priority=None):
         self.updated = (stoch.clone(), deter.clone())
         self.updated_priority = None if priority is None else priority.clone()
+
+
+class FakeFrozenEncoder(torch.nn.Module):
+    def __init__(self, embed_dim):
+        super().__init__()
+        self.embed_dim = int(embed_dim)
+
+    def forward(self, obs):
+        batch = next(iter(obs.values())).shape[0]
+        return torch.zeros(batch, self.embed_dim, dtype=torch.float32)
+
+
+class FakeFrozenRSSM(torch.nn.Module):
+    def __init__(self, feat_dim):
+        super().__init__()
+        self.feat_dim = int(feat_dim)
+
+    def obs_step(self, prev_stoch, prev_deter, prev_action, embed, is_first):
+        return prev_stoch, prev_deter, None
+
+    def get_feat(self, stoch, deter):
+        batch = stoch.shape[0]
+        return torch.zeros(batch, self.feat_dim, dtype=torch.float32)
+
+
+class FakeFrozenActor(torch.nn.Module):
+    def __init__(self, logits):
+        super().__init__()
+        self.register_buffer("logits", torch.tensor(logits, dtype=torch.float32))
+
+    def forward(self, feat):
+        logits = self.logits.unsqueeze(0).expand(feat.shape[0], -1)
+        return dists.OneHotDist(logits)
 
 
 def make_model_config(cnn_keys, mlp_keys, arc3_grid_keys="^$", use_objectification=False, use_phase2=False):
@@ -480,6 +514,38 @@ class Phase1ATest(unittest.TestCase):
         obs_space = DictSpace({"state": BoxSpace((6,))})
         obs = torch.randn(2, 4, 6)
         self._run_case(obs_space, {"state": obs}, cnn_keys="^$", mlp_keys="state")
+
+    def test_eval_repeat_calibration_switches_low_confidence_repeat_to_second_best(self):
+        config = make_model_config(cnn_keys="^$", mlp_keys="state")
+        config.actor_eval = OmegaConf.create(
+            {
+                "repeat_calibration": True,
+                "repeat_threshold": 2,
+                "min_top1_prob": 0.5,
+                "min_margin": 0.15,
+            }
+        )
+        obs_space = DictSpace({"state": BoxSpace((6,))})
+        act_space = DiscreteSpace(3)
+        agent = Dreamer(config, obs_space, act_space)
+        agent._frozen_encoder = FakeFrozenEncoder(agent.embed_size)
+        agent._frozen_rssm = FakeFrozenRSSM(agent.rssm.feat_size)
+        agent._frozen_actor = FakeFrozenActor([1.2, 1.1, 0.0])
+
+        obs = {
+            "state": torch.zeros(2, 6, dtype=torch.float32),
+            "is_first": torch.zeros(2, dtype=torch.bool),
+        }
+        state = agent.get_initial_state(2)
+        state["prev_action"] = F.one_hot(torch.tensor([0, 0]), num_classes=3).to(torch.float32)
+        state["eval_repeat_count"] = torch.tensor([2, 1], dtype=torch.int32)
+
+        action, next_state = agent.act(obs, state, eval=True)
+
+        torch.testing.assert_close(action[0], torch.tensor([0.0, 1.0, 0.0]))
+        torch.testing.assert_close(action[1], torch.tensor([1.0, 0.0, 0.0]))
+        self.assertEqual(int(next_state["eval_repeat_count"][0]), 1)
+        self.assertEqual(int(next_state["eval_repeat_count"][1]), 2)
 
     def test_arc3_grid_phase1a_update(self):
         obs_space = DictSpace(
