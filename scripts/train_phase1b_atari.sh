@@ -2,7 +2,8 @@
 set -euo pipefail
 
 ROOT_DIR=$(cd "$(dirname "$0")/.." && pwd)
-LOGDIR=${LOGDIR:-"$ROOT_DIR/logdir/phase1b_atari"}
+source "$ROOT_DIR/scripts/logdir_naming.sh"
+LOGDIR=${LOGDIR:-$(default_versioned_logdir "$ROOT_DIR" "phase1b_atari")}
 PYTHON_BIN=${PYTHON:-}
 if [ -z "$PYTHON_BIN" ]; then
   if [ -x "$ROOT_DIR/.venv/bin/python" ]; then

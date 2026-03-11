@@ -2,6 +2,7 @@
 set -euo pipefail
 
 ROOT_DIR=$(cd "$(dirname "$0")/.." && pwd)
+source "$ROOT_DIR/scripts/logdir_naming.sh"
 PYTHON_BIN=${PYTHON:-}
 if [ -z "$PYTHON_BIN" ]; then
   if [ -x "$ROOT_DIR/.venv/bin/python" ]; then
@@ -12,7 +13,7 @@ if [ -z "$PYTHON_BIN" ]; then
 fi
 
 SEEDS=${SEEDS:-"0 1 2"}
-BASE_LOGDIR=${BASE_LOGDIR:-"$ROOT_DIR/logdir/bench_phase1b_arc3"}
+BASE_LOGDIR=${BASE_LOGDIR:-$(default_versioned_logdir "$ROOT_DIR" "bench_phase1b_arc3")}
 ENV_DIR=${ARC3_ENV_DIR:-/home/zdx/github/VSAHDC/ARC-AGI-3-Agents/environment_files}
 REC_DIR=${ARC3_RECORDINGS_DIR:-/home/zdx/github/VSAHDC/ARC-AGI-3-Agents/recordings}
 

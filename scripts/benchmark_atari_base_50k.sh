@@ -2,6 +2,7 @@
 set -euo pipefail
 
 ROOT_DIR=$(cd "$(dirname "$0")/.." && pwd)
+source "$ROOT_DIR/scripts/logdir_naming.sh"
 PYTHON_BIN=${PYTHON:-}
 if [ -z "$PYTHON_BIN" ]; then
   if [ -x "$ROOT_DIR/.venv/bin/python" ]; then
@@ -13,7 +14,7 @@ fi
 
 SEEDS=${SEEDS:-"0 2"}
 VARIANTS=${VARIANTS:-"dreamer r2dreamer"}
-BASE_LOGDIR=${BASE_LOGDIR:-"$ROOT_DIR/logdir/bench_atari_base_50k_alien"}
+BASE_LOGDIR=${BASE_LOGDIR:-$(default_versioned_logdir "$ROOT_DIR" "bench_atari_base_50k_alien")}
 TASK=${TASK:-atari_alien}
 STEPS=${STEPS:-50000}
 TRAIN_RATIO=${TRAIN_RATIO:-32}
