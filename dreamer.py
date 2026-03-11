@@ -32,6 +32,11 @@ class Dreamer(nn.Module):
         super().__init__()
         self.device = torch.device(config.device)
         self.act_entropy = float(config.act_entropy)
+        actor_entropy_schedule_cfg = getattr(config, "actor_entropy_schedule", {})
+        self.actor_entropy_decay = bool(getattr(actor_entropy_schedule_cfg, "decay", False))
+        self.actor_entropy_start_updates = max(0, int(getattr(actor_entropy_schedule_cfg, "start_updates", 0)))
+        self.actor_entropy_ramp_updates = max(1, int(getattr(actor_entropy_schedule_cfg, "ramp_updates", 1)))
+        self.actor_entropy_min_scale = float(getattr(actor_entropy_schedule_cfg, "min_scale", 1.0))
         self.kl_free = float(config.kl_free)
         self.imag_horizon = int(config.imag_horizon)
         self.horizon = int(config.horizon)
@@ -46,6 +51,9 @@ class Dreamer(nn.Module):
         self.actor_eval_min_margin = float(getattr(actor_eval_cfg, "min_margin", 0.15))
         actor_imagination_cfg = getattr(config, "actor_imagination", {})
         self.actor_imagination_mode_mix = float(getattr(actor_imagination_cfg, "mode_mix", 0.0))
+        self.actor_imagination_mode_mix_start_updates = max(
+            0, int(getattr(actor_imagination_cfg, "mode_mix_start_updates", 0))
+        )
         self.actor_imagination_mode_mix_ramp_updates = max(
             1, int(getattr(actor_imagination_cfg, "mode_mix_ramp_updates", 1))
         )
@@ -1716,7 +1724,8 @@ class Dreamer(nn.Module):
         # (B*T, T_imag-1, 1)
         logpi = policy.log_prob(imag_action)[:, :-1].unsqueeze(-1)
         entropy = policy.entropy()[:, :-1].unsqueeze(-1)
-        losses["policy"] = torch.mean(weight[:, :-1].detach() * -(logpi * adv.detach() + self.act_entropy * entropy))
+        act_entropy_coeff = self._actor_entropy_coeff()
+        losses["policy"] = torch.mean(weight[:, :-1].detach() * -(logpi * adv.detach() + act_entropy_coeff * entropy))
 
         imag_value_dist = self.value(imag_feat)
         # (B*T, T_imag, 1)
@@ -1742,6 +1751,7 @@ class Dreamer(nn.Module):
         metrics["weight"] = torch.mean(weight)
         metrics["action_entropy"] = torch.mean(entropy)
         metrics["actor_entropy"] = metrics["action_entropy"]
+        metrics["actor_entropy_coeff"] = torch.tensor(act_entropy_coeff, device=self.device, dtype=torch.float32)
         metrics.update(self._actor_policy_diagnostics(policy, imag_action))
         metrics["actor_imag_mode_mix"] = torch.tensor(
             self._actor_imagination_mode_mix_ratio(), device=self.device, dtype=torch.float32
@@ -1818,8 +1828,23 @@ class Dreamer(nn.Module):
     def _actor_imagination_mode_mix_ratio(self):
         if not self.act_discrete or self.actor_imagination_mode_mix <= 0:
             return 0.0
-        progress = min(1.0, float(self._model_updates + 1) / float(self.actor_imagination_mode_mix_ramp_updates))
+        updates = self._model_updates + 1
+        if updates <= self.actor_imagination_mode_mix_start_updates:
+            return 0.0
+        ramp_updates = updates - self.actor_imagination_mode_mix_start_updates
+        progress = min(1.0, float(ramp_updates) / float(self.actor_imagination_mode_mix_ramp_updates))
         return float(self.actor_imagination_mode_mix) * progress
+
+    def _actor_entropy_coeff(self):
+        if not self.actor_entropy_decay:
+            return float(self.act_entropy)
+        updates = self._model_updates + 1
+        if updates <= self.actor_entropy_start_updates:
+            return float(self.act_entropy)
+        ramp_updates = updates - self.actor_entropy_start_updates
+        progress = min(1.0, float(ramp_updates) / float(self.actor_entropy_ramp_updates))
+        scale = 1.0 - progress * (1.0 - self.actor_entropy_min_scale)
+        return float(self.act_entropy) * float(scale)
 
     @torch.no_grad()
     def _imagine(self, start, imag_horizon):

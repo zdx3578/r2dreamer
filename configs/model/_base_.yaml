@@ -9,8 +9,14 @@ actor_eval:
   min_top1_prob: 0.5
   min_margin: 0.15
 actor_imagination:
-  mode_mix: 0.2
-  mode_mix_ramp_updates: 1000
+  mode_mix: 0.1
+  mode_mix_start_updates: 1500
+  mode_mix_ramp_updates: 1500
+actor_entropy_schedule:
+  decay: False
+  start_updates: 1500
+  ramp_updates: 1500
+  min_scale: 0.1
 compile: True
 log_grads: False
 device: ${device}

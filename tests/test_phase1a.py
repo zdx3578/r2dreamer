@@ -552,7 +552,9 @@ class Phase1ATest(unittest.TestCase):
 
     def test_imagination_mode_mix_can_force_greedy_rollout_actions(self):
         config = make_model_config(cnn_keys="^$", mlp_keys="state")
-        config.actor_imagination = OmegaConf.create({"mode_mix": 1.0, "mode_mix_ramp_updates": 1})
+        config.actor_imagination = OmegaConf.create(
+            {"mode_mix": 1.0, "mode_mix_start_updates": 0, "mode_mix_ramp_updates": 1}
+        )
         obs_space = DictSpace({"state": BoxSpace((6,))})
         act_space = DiscreteSpace(3)
         agent = Dreamer(config, obs_space, act_space)
@@ -566,6 +568,43 @@ class Phase1ATest(unittest.TestCase):
         for step in range(imag_action.shape[1]):
             torch.testing.assert_close(imag_action[0, step], expected)
             torch.testing.assert_close(imag_action[1, step], expected)
+
+    def test_imagination_mode_mix_ratio_stays_zero_before_start_updates(self):
+        config = make_model_config(cnn_keys="^$", mlp_keys="state")
+        config.actor_imagination = OmegaConf.create(
+            {"mode_mix": 0.2, "mode_mix_start_updates": 100, "mode_mix_ramp_updates": 50}
+        )
+        obs_space = DictSpace({"state": BoxSpace((6,))})
+        act_space = DiscreteSpace(3)
+        agent = Dreamer(config, obs_space, act_space)
+
+        agent._model_updates = 50
+        self.assertEqual(agent._actor_imagination_mode_mix_ratio(), 0.0)
+
+        agent._model_updates = 124
+        self.assertAlmostEqual(agent._actor_imagination_mode_mix_ratio(), 0.1, places=6)
+
+        agent._model_updates = 200
+        self.assertAlmostEqual(agent._actor_imagination_mode_mix_ratio(), 0.2, places=6)
+
+    def test_actor_entropy_coeff_decays_only_after_start_updates(self):
+        config = make_model_config(cnn_keys="^$", mlp_keys="state")
+        config.actor_entropy_schedule = OmegaConf.create(
+            {"decay": True, "start_updates": 100, "ramp_updates": 50, "min_scale": 0.1}
+        )
+        obs_space = DictSpace({"state": BoxSpace((6,))})
+        act_space = DiscreteSpace(3)
+        agent = Dreamer(config, obs_space, act_space)
+
+        base = float(config.act_entropy)
+        agent._model_updates = 50
+        self.assertAlmostEqual(agent._actor_entropy_coeff(), base, places=12)
+
+        agent._model_updates = 124
+        self.assertAlmostEqual(agent._actor_entropy_coeff(), base * 0.55, places=12)
+
+        agent._model_updates = 200
+        self.assertAlmostEqual(agent._actor_entropy_coeff(), base * 0.1, places=12)
 
     def test_arc3_grid_phase1a_update(self):
         obs_space = DictSpace(
