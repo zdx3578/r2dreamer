@@ -79,7 +79,6 @@ PY
       env.task="$TASK" \
       trainer.eval_episode_num="$EVAL_EPISODES" \
       trainer.eval_every="$EVAL_EVERY" \
-      trainer.save_every="$EVAL_EVERY" \
       trainer.pretrain=0 \
       trainer.update_log_every=1000 \
       model.compile=False \
