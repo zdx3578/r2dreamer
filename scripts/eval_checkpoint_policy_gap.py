@@ -35,7 +35,7 @@ def _close_envs(envs):
 
 
 @torch.no_grad()
-def _evaluate(agent, eval_envs, *, sample_actions):
+def _evaluate(agent, eval_envs, *, policy_mode):
     done = torch.ones(eval_envs.env_num, dtype=torch.bool, device=agent.device)
     once_done = torch.zeros(eval_envs.env_num, dtype=torch.bool, device=agent.device)
     steps = torch.zeros(eval_envs.env_num, dtype=torch.int32, device=agent.device)
@@ -49,7 +49,7 @@ def _evaluate(agent, eval_envs, *, sample_actions):
         trans = trans_cpu.to(agent.device, non_blocking=True)
         done = done_cpu.to(agent.device)
         trans["action"] = act
-        act, agent_state = agent.act(trans, agent_state, eval=not sample_actions)
+        act, agent_state = agent.act(trans, agent_state, eval=True, eval_policy=policy_mode)
         returns += trans["reward"][:, 0] * ~once_done
         once_done |= done
 
@@ -88,8 +88,8 @@ def _build_agent(config, checkpoint_path):
     return agent
 
 
-def _run_policy(agent, config, *, sample_actions, repeats, base_seed, seed_stride):
-    key = "sample" if sample_actions else "mode"
+def _run_policy(agent, config, *, policy_mode, repeats, base_seed, seed_stride):
+    key = policy_mode
     runs = []
     for repeat_idx in range(repeats):
         seed = int(base_seed + repeat_idx * seed_stride)
@@ -97,7 +97,7 @@ def _run_policy(agent, config, *, sample_actions, repeats, base_seed, seed_strid
         config.env.seed = seed
         eval_envs = _make_eval_envs(config.env)
         try:
-            result = _evaluate(agent, eval_envs, sample_actions=sample_actions)
+            result = _evaluate(agent, eval_envs, policy_mode=policy_mode)
         finally:
             _close_envs(eval_envs)
         result.update({"repeat": repeat_idx, "seed": seed, "policy": key})
@@ -134,10 +134,18 @@ def main():
     config = _load_config(config_path, args.device, args.eval_episodes)
     agent = _build_agent(config, checkpoint_path)
 
+    raw_mode_runs = _run_policy(
+        agent,
+        config,
+        policy_mode="raw_mode",
+        repeats=int(args.repeats),
+        base_seed=int(config.seed),
+        seed_stride=int(args.seed_stride),
+    )
     mode_runs = _run_policy(
         agent,
         config,
-        sample_actions=False,
+        policy_mode="calibrated_mode",
         repeats=int(args.repeats),
         base_seed=int(config.seed),
         seed_stride=int(args.seed_stride),
@@ -145,12 +153,13 @@ def main():
     sample_runs = _run_policy(
         agent,
         config,
-        sample_actions=True,
+        policy_mode="sample",
         repeats=int(args.repeats),
         base_seed=int(config.seed),
         seed_stride=int(args.seed_stride),
     )
 
+    raw_mode_summary = _summarize_runs(raw_mode_runs)
     mode_summary = _summarize_runs(mode_runs)
     sample_summary = _summarize_runs(sample_runs)
     result = {
@@ -159,6 +168,10 @@ def main():
         "device": str(config.device),
         "eval_episodes": int(config.env.eval_episode_num),
         "repeats": int(args.repeats),
+        "raw_mode": {
+            "summary": raw_mode_summary,
+            "runs": raw_mode_runs,
+        },
         "mode": {
             "summary": mode_summary,
             "runs": mode_runs,
@@ -168,6 +181,9 @@ def main():
             "runs": sample_runs,
         },
         "gap": {
+            "sample_minus_raw_mode_mean": _round(sample_summary["score_mean"] - raw_mode_summary["score_mean"]),
+            "sample_minus_raw_mode_length_mean": _round(sample_summary["length_mean"] - raw_mode_summary["length_mean"]),
+            "mode_minus_raw_mode_mean": _round(mode_summary["score_mean"] - raw_mode_summary["score_mean"]),
             "sample_minus_mode_mean": _round(sample_summary["score_mean"] - mode_summary["score_mean"]),
             "sample_minus_mode_length_mean": _round(sample_summary["length_mean"] - mode_summary["length_mean"]),
         },

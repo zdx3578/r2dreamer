@@ -159,6 +159,11 @@ def make_model_config(cnn_keys, mlp_keys, arc3_grid_keys="^$", use_objectificati
             "r2dreamer": {"lambd": 5e-4},
             "phase1a": {
                 "goal_horizon": 3,
+                "use_structure_spatial_recon": True,
+                "use_structure_change_targets": False,
+                "use_local_change_targets": False,
+                "use_direct_delta_targets": False,
+                "direct_target_blend": 0.25,
                 "reach_horizon": 4,
                 "event_ema_decay": 0.99,
                 "event_threshold_scale": 1.0,
@@ -175,6 +180,8 @@ def make_model_config(cnn_keys, mlp_keys, arc3_grid_keys="^$", use_objectificati
             "phase2": {
                 "m_obj_threshold": 0.1,
                 "match_margin_threshold": 0.02,
+                "match_gate_mode": "soft",
+                "match_gate_floor": 0.25,
                 "memory_write_operator_threshold": 0.14,
                 "memory_write_binding_threshold": 0.30,
                 "memory_write_alignment_threshold": 0.60,
@@ -308,6 +315,8 @@ def make_model_config(cnn_keys, mlp_keys, arc3_grid_keys="^$", use_objectificati
             },
             "effect_model": {"layers": 2, "hidden": 32, "latent_dim": 24},
             "effect_heads": {"layers": 1, "hidden": 24},
+            "structure_decoder": {"hidden": 24, "temperature": 1.0},
+            "local_effect_decoder": {"layers": 1, "hidden": 24},
             "reachability_head": {"layers": 1, "hidden": 24},
             "goal_progress_head": {"layers": 1, "hidden": 24},
             "objectification": {
@@ -549,6 +558,110 @@ class Phase1ATest(unittest.TestCase):
         torch.testing.assert_close(action[1], torch.tensor([1.0, 0.0, 0.0]))
         self.assertEqual(int(next_state["eval_repeat_count"][0]), 1)
         self.assertEqual(int(next_state["eval_repeat_count"][1]), 2)
+
+    def test_eval_raw_mode_bypasses_repeat_calibration(self):
+        config = make_model_config(cnn_keys="^$", mlp_keys="state")
+        config.actor_eval = OmegaConf.create(
+            {
+                "repeat_calibration": True,
+                "repeat_threshold": 2,
+                "min_top1_prob": 0.5,
+                "min_margin": 0.15,
+            }
+        )
+        obs_space = DictSpace({"state": BoxSpace((6,))})
+        act_space = DiscreteSpace(3)
+        agent = Dreamer(config, obs_space, act_space)
+        agent._frozen_encoder = FakeFrozenEncoder(agent.embed_size)
+        agent._frozen_rssm = FakeFrozenRSSM(agent.rssm.feat_size)
+        agent._frozen_actor = FakeFrozenActor([1.2, 1.1, 0.0])
+
+        obs = {
+            "state": torch.zeros(1, 6, dtype=torch.float32),
+            "is_first": torch.zeros(1, dtype=torch.bool),
+        }
+        state = agent.get_initial_state(1)
+        state["prev_action"] = F.one_hot(torch.tensor([0]), num_classes=3).to(torch.float32)
+        state["eval_repeat_count"] = torch.tensor([2], dtype=torch.int32)
+
+        action, next_state, info = agent.act(obs, state, eval=True, eval_policy="raw_mode", return_info=True)
+
+        torch.testing.assert_close(action[0], torch.tensor([1.0, 0.0, 0.0]))
+        self.assertEqual(int(next_state["eval_repeat_count"][0]), 3)
+        self.assertAlmostEqual(float(info["actor_top1_prob"][0]), 0.453303, places=5)
+        self.assertAlmostEqual(float(info["actor_top1_top2_margin"][0]), 0.043137, places=5)
+
+    def test_phase2_soft_match_gate_uses_slot_match_margin_score(self):
+        config = make_model_config(cnn_keys="^$", mlp_keys="state")
+        config.phase2.match_margin_threshold = 0.2
+        config.phase2.match_gate_mode = "soft"
+        config.phase2.match_gate_floor = 0.25
+        obs_space = DictSpace({"state": BoxSpace((6,))})
+        act_space = DiscreteSpace(3)
+        agent = Dreamer(config, obs_space, act_space)
+
+        gate, object_gate, match_gate, warmup_gate = agent._phase2_gate(
+            {
+                "objectness_score": torch.tensor(0.6),
+                "slot_match_margin_score": torch.tensor(0.2),
+            }
+        )
+        self.assertAlmostEqual(float(object_gate), 0.5555555, places=5)
+        self.assertAlmostEqual(float(match_gate), 0.25, places=6)
+        self.assertAlmostEqual(float(gate), float(object_gate * match_gate * warmup_gate), places=6)
+
+        _, _, strong_match_gate, _ = agent._phase2_gate(
+            {
+                "objectness_score": torch.tensor(0.6),
+                "slot_match_margin_score": torch.tensor(0.6),
+            }
+        )
+        self.assertGreater(float(strong_match_gate), float(match_gate))
+
+    def test_structure_spatial_recon_survives_without_direct_change_targets(self):
+        torch.manual_seed(0)
+        config = make_model_config(cnn_keys="image", mlp_keys="^$")
+        config.use_structure_decoder = True
+        config.use_direct_spatial_targets = False
+        config.phase1a.use_structure_spatial_recon = True
+        config.phase1a.use_structure_change_targets = False
+        obs_space = DictSpace({"image": BoxSpace((16, 16, 3))})
+        act_space = BoxSpace((3,))
+        agent = Dreamer(config, obs_space, act_space)
+        obs = torch.randint(0, 256, (2, 4, 16, 16, 3), dtype=torch.uint8)
+        initial_state = agent.get_initial_state(obs.shape[0])
+        replay = FakeReplayBuffer(
+            make_batch({"image": obs}, sum(act_space.shape)),
+            (initial_state["stoch"], initial_state["deter"]),
+        )
+
+        metrics = agent.update(replay)
+
+        self.assertIn("loss/spatial_recon", metrics)
+        self.assertNotIn("loss/region_map", metrics)
+        self.assertNotIn("loss/slot_mask", metrics)
+
+    def test_local_change_targets_can_override_legacy_direct_switch(self):
+        torch.manual_seed(0)
+        config = make_model_config(cnn_keys="image", mlp_keys="^$")
+        config.use_local_decoder = True
+        config.use_direct_spatial_targets = False
+        config.phase1a.use_local_change_targets = True
+        obs_space = DictSpace({"image": BoxSpace((16, 16, 3))})
+        act_space = BoxSpace((3,))
+        agent = Dreamer(config, obs_space, act_space)
+        obs = torch.randint(0, 256, (2, 4, 16, 16, 3), dtype=torch.uint8)
+        initial_state = agent.get_initial_state(obs.shape[0])
+        replay = FakeReplayBuffer(
+            make_batch({"image": obs}, sum(act_space.shape)),
+            (initial_state["stoch"], initial_state["deter"]),
+        )
+
+        metrics = agent.update(replay)
+
+        self.assertIn("loss/local_change", metrics)
+        self.assertIn("loss/local_roi", metrics)
+        self.assertIn("loss/local_delta", metrics)
 
     def test_imagination_mode_mix_can_force_greedy_rollout_actions(self):
         config = make_model_config(cnn_keys="^$", mlp_keys="state")

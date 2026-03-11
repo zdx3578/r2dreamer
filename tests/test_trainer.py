@@ -114,6 +114,7 @@ class _FakeAgent(torch.nn.Module):
         super().__init__()
         self.device = torch.device("cpu")
         self.eval_flags = []
+        self.eval_policies = []
         self.weight = torch.nn.Parameter(torch.zeros(1, dtype=torch.float32))
 
     def eval(self):
@@ -134,8 +135,9 @@ class _FakeAgent(torch.nn.Module):
             batch_size=(batch_size,),
         )
 
-    def act(self, obs, state, eval=False):
+    def act(self, obs, state, eval=False, eval_policy="calibrated_mode", return_info=False):
         self.eval_flags.append(bool(eval))
+        self.eval_policies.append(eval_policy if eval else "train")
         action = torch.tensor([[1.0, 0.0]], dtype=torch.float32)
         next_state = TensorDict(
             {
@@ -145,7 +147,16 @@ class _FakeAgent(torch.nn.Module):
             },
             batch_size=state.batch_size,
         )
-        return action, next_state
+        if not return_info:
+            return action, next_state
+        info = {
+            "actor_top1_prob": torch.tensor([0.75], dtype=torch.float32),
+            "actor_top1_top2_margin": torch.tensor([0.25], dtype=torch.float32),
+            "actor_mode_repeat": torch.tensor([False]),
+            "actor_repeat_valid": torch.tensor([False]),
+            "actor_repeat_streak": torch.tensor([1], dtype=torch.int32),
+        }
+        return action, next_state, info
 
     def update(self, replay_buffer):
         raise AssertionError("update() should not be reached in this test")
@@ -204,7 +215,10 @@ class TrainerEvalSchedulingTest(unittest.TestCase):
 
         self.assertIn(True, agent.eval_flags)
         self.assertIn("episode/eval_score", [name for name, _ in logger.scalars])
+        self.assertIn("episode/eval_raw_mode_score", [name for name, _ in logger.scalars])
         self.assertIn("episode/eval_mode_score", [name for name, _ in logger.scalars])
+        self.assertIn("episode/eval_calibrated_mode_score", [name for name, _ in logger.scalars])
+        self.assertIn("episode/eval_actor_top1_prob", [name for name, _ in logger.scalars])
         self.assertIn((1, False), logger.write_steps)
 
     def test_begin_logs_sample_probe_metrics_when_enabled(self):

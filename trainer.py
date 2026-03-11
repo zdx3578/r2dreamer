@@ -63,7 +63,7 @@ class OnlineTrainer:
         checkpoint_path = self._checkpoint_dir / f"eval_alert_step_{int(step):08d}.pt"
         torch.save(self._checkpoint_items(agent, step), checkpoint_path)
 
-    def _run_eval_episodes(self, agent, envs, *, deterministic, log_prefix, capture_video=False):
+    def _run_eval_episodes(self, agent, envs, *, policy_mode, log_prefix, capture_video=False):
         """Run evaluation episodes for one policy variant.
 
         Environment stepping is executed on CPU to avoid GPU<->CPU synchronizations
@@ -76,6 +76,14 @@ class OnlineTrainer:
         steps = torch.zeros(envs.env_num, dtype=torch.int32, device=agent.device)
         returns = torch.zeros(envs.env_num, dtype=torch.float32, device=agent.device)
         log_metrics = {}
+        diagnostics = {
+            "actor_top1_prob_sum": torch.tensor(0.0, dtype=torch.float32, device=agent.device),
+            "actor_top1_top2_margin_sum": torch.tensor(0.0, dtype=torch.float32, device=agent.device),
+            "actor_step_count": torch.tensor(0.0, dtype=torch.float32, device=agent.device),
+            "actor_mode_repeat_sum": torch.tensor(0.0, dtype=torch.float32, device=agent.device),
+            "actor_repeat_count": torch.tensor(0.0, dtype=torch.float32, device=agent.device),
+            "actor_repeat_streak_max": torch.tensor(0.0, dtype=torch.float32, device=agent.device),
+        }
         # cache is only used for video logging / open-loop prediction.
         cache = []
         agent_state = agent.get_initial_state(envs.env_num)
@@ -101,19 +109,48 @@ class OnlineTrainer:
             if capture_video and len(cache) < self.batch_length:
                 cache.append(trans.clone())
             # (B, A)
-            act, agent_state = agent.act(trans, agent_state, eval=deterministic)
+            act, agent_state, act_info = agent.act(
+                trans,
+                agent_state,
+                eval=True,
+                eval_policy=policy_mode,
+                return_info=True,
+            )
             returns += trans["reward"][:, 0] * ~once_done
             for key, value in trans.items():
                 if key.startswith("log_"):
                     if key not in log_metrics:
                         log_metrics[key] = torch.zeros_like(returns)
                     log_metrics[key] += value[:, 0] * ~once_done
+            active = (~once_done).to(torch.float32)
+            if "actor_top1_prob" in act_info:
+                diagnostics["actor_top1_prob_sum"] += (act_info["actor_top1_prob"] * active).sum()
+                diagnostics["actor_top1_top2_margin_sum"] += (act_info["actor_top1_top2_margin"] * active).sum()
+                diagnostics["actor_step_count"] += active.sum()
+            if "actor_mode_repeat" in act_info:
+                repeat_valid = act_info["actor_repeat_valid"].to(torch.float32) * active
+                diagnostics["actor_mode_repeat_sum"] += (act_info["actor_mode_repeat"].to(torch.float32) * repeat_valid).sum()
+                diagnostics["actor_repeat_count"] += repeat_valid.sum()
+                diagnostics["actor_repeat_streak_max"] = torch.maximum(
+                    diagnostics["actor_repeat_streak_max"],
+                    (act_info["actor_repeat_streak"].to(torch.float32) * repeat_valid).max(),
+                )
             once_done |= done
+        result_diagnostics = {}
+        if diagnostics["actor_step_count"] > 0:
+            result_diagnostics["actor_top1_prob"] = diagnostics["actor_top1_prob_sum"] / diagnostics["actor_step_count"]
+            result_diagnostics["actor_top1_top2_margin"] = (
+                diagnostics["actor_top1_top2_margin_sum"] / diagnostics["actor_step_count"]
+            )
+        if diagnostics["actor_repeat_count"] > 0:
+            result_diagnostics["actor_mode_repeat_rate"] = diagnostics["actor_mode_repeat_sum"] / diagnostics["actor_repeat_count"]
+            result_diagnostics["actor_repeat_streak_max"] = diagnostics["actor_repeat_streak_max"]
         # dict of (B, T, *)
         return {
             "score": returns.mean(),
             "length": steps.to(torch.float32).mean(),
             "log_metrics": log_metrics,
+            "diagnostics": result_diagnostics,
             "cache": torch.stack(cache, dim=1) if len(cache) else None,
             "log_prefix": log_prefix,
         }
@@ -123,11 +160,15 @@ class OnlineTrainer:
         length = result["length"]
         log_prefix = result["log_prefix"]
         log_metrics = result["log_metrics"]
+        diagnostics = result.get("diagnostics", {})
         cache = result["cache"]
 
         if primary:
             self.logger.scalar("episode/eval_score", score)
             self.logger.scalar("episode/eval_length", length)
+            if log_prefix == "eval_mode":
+                self.logger.scalar("episode/eval_calibrated_mode_score", score)
+                self.logger.scalar("episode/eval_calibrated_mode_length", length)
         self.logger.scalar(f"episode/{log_prefix}_score", score)
         self.logger.scalar(f"episode/{log_prefix}_length", length)
         for key, value in log_metrics.items():
@@ -136,6 +177,12 @@ class OnlineTrainer:
             if primary:
                 self.logger.scalar(f"episode/eval_{key[4:]}", value.mean())
             self.logger.scalar(f"episode/{log_prefix}_{key[4:]}", value.mean())
+        for key, value in diagnostics.items():
+            if primary:
+                self.logger.scalar(f"episode/eval_{key}", value)
+                if log_prefix == "eval_mode":
+                    self.logger.scalar(f"episode/eval_calibrated_mode_{key}", value)
+            self.logger.scalar(f"episode/{log_prefix}_{key}", value)
         return cache
 
     def eval(self, agent, train_step):
@@ -145,11 +192,18 @@ class OnlineTrainer:
         mode_result = self._run_eval_episodes(
             agent,
             self.eval_envs,
-            deterministic=True,
+            policy_mode="calibrated_mode",
             log_prefix="eval_mode",
             capture_video=True,
         )
         cache = self._log_eval_result(mode_result, primary=True)
+        raw_mode_result = self._run_eval_episodes(
+            agent,
+            self.eval_envs,
+            policy_mode="raw_mode",
+            log_prefix="eval_raw_mode",
+        )
+        self._log_eval_result(raw_mode_result)
         eval_score = float(mode_result["score"].detach().cpu())
         zero_collapse_triggered = 1.0 if self._prev_eval_score is not None and eval_score == 0.0 and self._prev_eval_score > 0 else 0.0
         gap_triggered = 0.0
@@ -160,13 +214,13 @@ class OnlineTrainer:
             probe_mode_result = self._run_eval_episodes(
                 agent,
                 self.probe_eval_envs,
-                deterministic=True,
+                policy_mode="calibrated_mode",
                 log_prefix="eval_probe_mode",
             )
             sample_result = self._run_eval_episodes(
                 agent,
                 self.sample_eval_envs,
-                deterministic=False,
+                policy_mode="sample",
                 log_prefix="eval_sample",
             )
             self._log_eval_result(probe_mode_result)

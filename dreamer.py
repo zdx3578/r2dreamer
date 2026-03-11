@@ -105,16 +105,44 @@ class Dreamer(nn.Module):
         self.use_rule_update = bool(getattr(config, "use_rule_update", False))
         self.use_structure_decoder = bool(getattr(config, "use_structure_decoder", False))
         self.use_local_decoder = bool(getattr(config, "use_local_decoder", False))
+        # Keep the old umbrella switch for backwards compatibility, but allow each
+        # direct-spatial consumer to be toggled independently for cleaner A/Bs.
         self.use_direct_spatial_targets = bool(getattr(config, "use_direct_spatial_targets", False))
         phase1a_cfg = getattr(config, "phase1a", {})
         self.goal_horizon = int(getattr(phase1a_cfg, "goal_horizon", 3))
+        self.phase1a_use_structure_spatial_recon = bool(getattr(phase1a_cfg, "use_structure_spatial_recon", True))
+        self.phase1a_use_structure_change_targets = bool(
+            getattr(phase1a_cfg, "use_structure_change_targets", self.use_direct_spatial_targets)
+        )
+        self.phase1a_use_local_change_targets = bool(
+            getattr(phase1a_cfg, "use_local_change_targets", self.use_direct_spatial_targets)
+        )
+        self.phase1a_use_direct_delta_targets = bool(
+            getattr(phase1a_cfg, "use_direct_delta_targets", self.use_direct_spatial_targets)
+        )
         self.phase1a_direct_target_blend = float(getattr(phase1a_cfg, "direct_target_blend", 0.75))
         self.phase1a_change_threshold = float(getattr(phase1a_cfg, "change_threshold", 0.04))
         self.phase1a_roi_pool = max(1, int(getattr(phase1a_cfg, "roi_pool", 3)))
         if self.phase1a_roi_pool % 2 == 0:
             self.phase1a_roi_pool += 1
+        self.phase1a_build_direct_spatial_targets = (
+            self.phase1a_use_structure_change_targets
+            or self.phase1a_use_local_change_targets
+            or self.phase1a_use_direct_delta_targets
+            or self.phase1a_direct_target_blend > 0.0
+        )
+        self.phase1a_requires_spatial_features = (
+            self.use_structure_decoder
+            or self.use_local_decoder
+            or self.phase1a_use_structure_change_targets
+            or self.phase1a_use_local_change_targets
+            or self.phase1a_use_direct_delta_targets
+        )
         phase2_cfg = getattr(config, "phase2", {})
         self.phase2_m_obj_threshold = float(getattr(phase2_cfg, "m_obj_threshold", 0.2))
+        self.phase2_match_margin_threshold = float(getattr(phase2_cfg, "match_margin_threshold", 0.02))
+        self.phase2_match_gate_mode = str(getattr(phase2_cfg, "match_gate_mode", "soft"))
+        self.phase2_match_gate_floor = float(getattr(phase2_cfg, "match_gate_floor", 0.25))
         self.phase2_warmup_updates = int(getattr(phase2_cfg, "warmup_updates", 0))
         legacy_write_threshold = getattr(phase2_cfg, "memory_write_threshold", None)
         self.phase2_memory_operator_threshold = float(
@@ -187,7 +215,7 @@ class Dreamer(nn.Module):
             raise ValueError("Structure decoder requires use_structured_readout=True.")
         if self.use_local_decoder and not (self.use_structured_readout and self.use_effect_model):
             raise ValueError("Local decoder requires structured readout and effect model.")
-        if (self.use_structure_decoder or self.use_local_decoder or self.use_direct_spatial_targets) and self.encoder_spatial_shape is None:
+        if self.phase1a_requires_spatial_features and self.encoder_spatial_shape is None:
             raise ValueError("Spatial structure supervision requires encoder spatial features.")
         if self.use_objectification and not (self.use_structured_readout and self.use_effect_model):
             raise ValueError("Objectification requires both structured readout and effect model.")
@@ -277,9 +305,11 @@ class Dreamer(nn.Module):
                 self.structured_readout.obj_dim,
             )
             modules.update({"structure_decoder": self.structure_decoder})
-            self._loss_scales.setdefault("spatial_recon", 1.0)
-            self._loss_scales.setdefault("region_map", 1.0)
-            self._loss_scales.setdefault("slot_mask", 1.0)
+            if self.phase1a_use_structure_spatial_recon:
+                self._loss_scales.setdefault("spatial_recon", 1.0)
+            if self.phase1a_use_structure_change_targets:
+                self._loss_scales.setdefault("region_map", 1.0)
+                self._loss_scales.setdefault("slot_mask", 1.0)
         if self.use_effect_model:
             self.effect_model = phase1a.EffectModel(
                 config.effect_model,
@@ -308,7 +338,7 @@ class Dreamer(nn.Module):
             self._loss_scales.setdefault("delta_obj", 1.0)
             self._loss_scales.setdefault("delta_global", 1.0)
             self._loss_scales.setdefault("event", 1.0)
-            if self.use_direct_spatial_targets:
+            if self.phase1a_use_direct_delta_targets:
                 self._loss_scales.setdefault("delta_map_direct", 1.0)
                 self._loss_scales.setdefault("delta_obj_direct", 1.0)
         if self.use_local_decoder:
@@ -320,9 +350,10 @@ class Dreamer(nn.Module):
                 bool(config.norm),
             )
             modules.update({"local_effect_decoder": self.local_effect_decoder})
-            self._loss_scales.setdefault("local_change", 1.0)
-            self._loss_scales.setdefault("local_roi", 1.0)
-            self._loss_scales.setdefault("local_delta", 1.0)
+            if self.phase1a_use_local_change_targets:
+                self._loss_scales.setdefault("local_change", 1.0)
+                self._loss_scales.setdefault("local_roi", 1.0)
+                self._loss_scales.setdefault("local_delta", 1.0)
         if self.use_reachability_head:
             self.reachability_head = phase1a.ReachabilityHead(
                 config.reachability_head,
@@ -550,7 +581,7 @@ class Dreamer(nn.Module):
         return self
 
     @torch.no_grad()
-    def act(self, obs, state, eval=False):
+    def act(self, obs, state, eval=False, eval_policy="calibrated_mode", return_info=False):
         """Policy inference step."""
         # obs: dict of (B, *), state: (stoch: (B, S, K), deter: (B, D), prev_action: (B, A))
         torch.compiler.cudagraph_mark_step_begin()
@@ -577,13 +608,27 @@ class Dreamer(nn.Module):
         action_dist = self._frozen_actor(feat)
         # (B, A)
         if eval:
-            action = self._select_eval_action(action_dist, prev_action_for_repeat, prev_repeat)
+            action = self._select_eval_action(
+                action_dist,
+                prev_action_for_repeat,
+                prev_repeat,
+                eval_policy=eval_policy,
+            )
         else:
             action = action_dist.rsample()
         repeat_count = self._update_eval_repeat_count(action, prev_action_for_repeat, prev_repeat)
-        return action, TensorDict(
+        next_state = TensorDict(
             {"stoch": stoch, "deter": deter, "prev_action": action, "eval_repeat_count": repeat_count},
             batch_size=state.batch_size,
+        )
+        if not return_info:
+            return action, next_state
+        return action, next_state, self._action_eval_info(
+            action_dist,
+            action,
+            prev_action_for_repeat,
+            repeat_count,
+            is_first,
         )
 
     @torch.no_grad()
@@ -609,8 +654,14 @@ class Dreamer(nn.Module):
         return torch.where(same_action, prev_repeat + 1, one)
 
     @torch.no_grad()
-    def _select_eval_action(self, action_dist, prev_action, prev_repeat):
+    def _select_eval_action(self, action_dist, prev_action, prev_repeat, eval_policy="calibrated_mode"):
+        if eval_policy == "sample":
+            return action_dist.rsample()
         action = action_dist.mode
+        if eval_policy == "raw_mode":
+            return action
+        if eval_policy not in {"calibrated_mode", "mode"}:
+            raise ValueError(f"Unknown eval_policy: {eval_policy}")
         if not (self.act_discrete and self.actor_eval_repeat_calibration):
             return action
         if not isinstance(action_dist, dists.OneHotDist):
@@ -636,6 +687,21 @@ class Dreamer(nn.Module):
         second_idx = topk.indices[..., 1]
         second_action = F.one_hot(second_idx, probs.shape[-1]).to(action.dtype)
         return torch.where(switch_to_second.unsqueeze(-1), second_action, action)
+
+    @torch.no_grad()
+    def _action_eval_info(self, action_dist, action, prev_action, repeat_count, is_first):
+        info = {}
+        stats = dists.discrete_stats(action_dist)
+        if stats:
+            info["actor_top1_prob"] = stats["top1_prob"].detach()
+            info["actor_top1_top2_margin"] = stats["margin"].detach()
+        if self.act_discrete and action.shape[-1] == prev_action.shape[-1]:
+            action_idx = torch.argmax(action.detach(), dim=-1)
+            prev_idx = torch.argmax(prev_action.detach(), dim=-1)
+            info["actor_mode_repeat"] = (action_idx == prev_idx).detach()
+            info["actor_repeat_valid"] = (~is_first).detach()
+            info["actor_repeat_streak"] = repeat_count.detach()
+        return info
 
     @torch.no_grad()
     def video_pred(self, data, initial):
@@ -760,9 +826,11 @@ class Dreamer(nn.Module):
             "target_delta_rho": (nxt["rho_t"] - current["rho_t"]).detach(),
             "spatial_seq": spatial_seq,
         }
-        if self.use_direct_spatial_targets:
+        if self.phase1a_build_direct_spatial_targets:
             structured.update(self._build_direct_spatial_targets(data, spatial_seq, valid_mask_seq))
-        if self.use_structure_decoder and spatial_seq is not None:
+        if self.use_structure_decoder and spatial_seq is not None and (
+            self.phase1a_use_structure_spatial_recon or self.phase1a_use_structure_change_targets
+        ):
             structured["structure_decoder_out"] = self.structure_decoder(
                 spatial_seq[:, :-1],
                 current["M_t"],
@@ -797,7 +865,7 @@ class Dreamer(nn.Module):
                     "terminal_target": terminal_target,
                 }
             )
-            if self.use_local_decoder and spatial_seq is not None:
+            if self.use_local_decoder and spatial_seq is not None and self.phase1a_use_local_change_targets:
                 structured["local_decoder_out"] = self.local_effect_decoder(spatial_seq[:, :-1], z_eff)
         return structured
 
@@ -879,14 +947,20 @@ class Dreamer(nn.Module):
         if direct_spatial_soft is not None:
             metrics["phase1a/spatial_change_target"] = direct_spatial_soft.mean()
             metrics["phase1a/spatial_roi_target"] = direct_spatial_roi.mean()
-        if "structure_decoder_out" in structured and direct_spatial_binary is not None:
+        if "structure_decoder_out" in structured and self.phase1a_use_structure_spatial_recon:
             decoder_out = structured["structure_decoder_out"]
             losses["spatial_recon"] = self._weighted_loss(
                 decoder_out["spatial_recon"],
                 structured["spatial_target"],
-                direct_spatial_weight,
+                direct_spatial_weight if direct_spatial_weight is not None else structured["transition_valid_ratio"],
                 kind="mse",
             )
+        if (
+            "structure_decoder_out" in structured
+            and self.phase1a_use_structure_change_targets
+            and direct_spatial_binary is not None
+        ):
+            decoder_out = structured["structure_decoder_out"]
             losses["region_map"] = self._weighted_loss(
                 decoder_out["region_logits"],
                 direct_spatial_binary,
@@ -924,7 +998,7 @@ class Dreamer(nn.Module):
             metrics["phase1a/delta_obj_abs"] = (target_delta_O.abs() * structured["transition_obj_mask"]).mean()
             metrics["phase1a/delta_global_abs"] = (target_delta_g.abs() * structured["transition_valid_ratio"]).mean()
             metrics["phase1a/event_rate"] = event_target.mean()
-            if direct_spatial_soft is not None:
+            if direct_spatial_soft is not None and self.phase1a_use_direct_delta_targets:
                 pred_delta_map_mag = effect_out["delta_map"].abs().mean(dim=-1, keepdim=True)
                 pred_delta_obj_mag = effect_out["delta_obj"].abs().mean(dim=-1, keepdim=True)
                 losses["delta_map_direct"] = self._weighted_loss(
@@ -941,7 +1015,7 @@ class Dreamer(nn.Module):
                 )
                 metrics["phase1a/direct_delta_map_target"] = structured["direct_delta_map_target"].mean()
                 metrics["phase1a/direct_delta_obj_target"] = structured["direct_delta_obj_target"].mean()
-        if "local_decoder_out" in structured and direct_spatial_binary is not None:
+        if "local_decoder_out" in structured and self.phase1a_use_local_change_targets and direct_spatial_binary is not None:
             local_out = structured["local_decoder_out"]
             local_delta_weight = direct_spatial_weight * (0.25 + direct_spatial_roi)
             losses["local_change"] = self._weighted_loss(
@@ -1169,16 +1243,28 @@ class Dreamer(nn.Module):
     def _phase2_gate(self, objectification_out):
         if isinstance(objectification_out, dict):
             objectness_score = objectification_out["objectness_score"]
+            match_margin_score = objectification_out.get("slot_match_margin_score")
         else:
             objectness_score = objectification_out
+            match_margin_score = None
         object_gate = torch.clamp(
             (objectness_score.detach() - self.phase2_m_obj_threshold) / max(1e-6, 1.0 - self.phase2_m_obj_threshold),
             0.0,
             1.0,
         )
-        # Keep shuffled-match margin as a monitoring signal only: on Atari-style batches the
-        # random baseline stays high even in healthy runs, so using it as a hard gate shuts Phase2 off.
-        match_gate = objectness_score.new_tensor(1.0)
+        if self.phase2_match_gate_mode == "off" or match_margin_score is None:
+            match_gate = objectness_score.new_tensor(1.0)
+        elif self.phase2_match_gate_mode == "soft":
+            match_gate = torch.clamp(
+                (match_margin_score.detach() - self.phase2_match_margin_threshold)
+                / max(1e-6, 1.0 - self.phase2_match_margin_threshold),
+                0.0,
+                1.0,
+            )
+            floor = max(0.0, min(1.0, self.phase2_match_gate_floor))
+            match_gate = floor + (1.0 - floor) * match_gate
+        else:
+            raise ValueError(f"Unknown phase2.match_gate_mode: {self.phase2_match_gate_mode}")
         if self.phase2_warmup_updates <= 0:
             warmup_gate = objectness_score.new_tensor(1.0)
         else:
@@ -1234,7 +1320,7 @@ class Dreamer(nn.Module):
         impact_target = torch.tanh(reward_mass + global_mass + rule_mass)
         return scope_target, duration_target, impact_target
 
-    def _phase2_step_forward(self, feat, action, current, z_eff, objectness_score):
+    def _phase2_step_forward(self, feat, action, current, z_eff, objectification_out):
         op_out = self.operator_bank(
             feat,
             action,
@@ -1248,7 +1334,7 @@ class Dreamer(nn.Module):
         sig_out = self.signature_head(op_out["operator_embed"], op_out["context_embed"])
         rule_out = self.rule_update_head(z_eff, op_out["operator_embed"], bind_out["q_b"], sig_out["q_sigma"])
         memory_out = self.rule_memory.retrieve(op_out["q_u"], bind_out["q_b"], sig_out["q_sigma"])
-        gate, object_gate, match_gate, warmup_gate = self._phase2_gate(objectness_score)
+        gate, object_gate, match_gate, warmup_gate = self._phase2_gate(objectification_out)
         operator_conf, operator_id = op_out["q_u"].max(dim=-1)
         binding_conf, binding_id = bind_out["q_b"].max(dim=-1)
         apply_out = self.rule_apply(
@@ -1302,7 +1388,7 @@ class Dreamer(nn.Module):
             data["action"],
             structured["current"],
             structured["z_eff"],
-            structured["objectification_out"]["objectness_score"],
+            structured["objectification_out"],
         )
 
     def _phase2_rollout_prefix(self, horizon):
@@ -1339,7 +1425,7 @@ class Dreamer(nn.Module):
                 action,
                 rollout_current,
                 self.effect_model(feat, action, rollout_current["rho_t"]),
-                structured["objectification_out"]["objectness_score"],
+                structured["objectification_out"],
             )
             predicted_rho = rollout_art.rho_next_pred
 
