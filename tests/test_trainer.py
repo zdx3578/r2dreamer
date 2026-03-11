@@ -121,6 +121,7 @@ def _make_config(steps, save_every=0):
         eval_every=1,
         save_every=save_every,
         eval_episode_num=1,
+        sample_eval_episode_num=0,
         video_pred_log=False,
         params_hist_log=False,
         batch_length=1,
@@ -163,7 +164,32 @@ class TrainerEvalSchedulingTest(unittest.TestCase):
 
         self.assertIn(True, agent.eval_flags)
         self.assertIn("episode/eval_score", [name for name, _ in logger.scalars])
+        self.assertIn("episode/eval_mode_score", [name for name, _ in logger.scalars])
         self.assertIn((1, False), logger.write_steps)
+
+    def test_begin_logs_sample_probe_metrics_when_enabled(self):
+        logger = _FakeLogger()
+        config = _make_config(steps=2)
+        config.sample_eval_episode_num = 1
+        trainer = OnlineTrainer(
+            config,
+            _FakeReplayBuffer(),
+            logger,
+            None,
+            _FakeParallelEnv(reward_on_step=1.0),
+            _FakeParallelEnv(reward_on_step=2.0),
+            probe_eval_envs=_FakeParallelEnv(reward_on_step=2.0),
+            sample_eval_envs=_FakeParallelEnv(reward_on_step=2.0),
+        )
+        agent = _FakeAgent()
+
+        trainer.begin(agent)
+
+        scalar_map = dict(logger.scalars)
+        self.assertEqual(scalar_map["episode/eval_probe_mode_score"], 2.0)
+        self.assertEqual(scalar_map["episode/eval_sample_score"], 2.0)
+        self.assertEqual(scalar_map["episode/eval_gap"], 0.0)
+        self.assertEqual(scalar_map["episode/eval_gap_abs"], 0.0)
 
     def test_begin_saves_periodic_snapshots_for_positive_steps_only(self):
         with tempfile.TemporaryDirectory() as tmpdir:

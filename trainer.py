@@ -4,17 +4,20 @@ import tools
 
 
 class OnlineTrainer:
-    def __init__(self, config, replay_buffer, logger, logdir, train_envs, eval_envs):
+    def __init__(self, config, replay_buffer, logger, logdir, train_envs, eval_envs, probe_eval_envs=None, sample_eval_envs=None):
         self.replay_buffer = replay_buffer
         self.logger = logger
         self.logdir = logdir
         self.train_envs = train_envs
         self.eval_envs = eval_envs
+        self.probe_eval_envs = probe_eval_envs
+        self.sample_eval_envs = sample_eval_envs
         self.steps = int(config.steps)
         self.pretrain = int(config.pretrain)
         self.eval_every = int(config.eval_every)
         self.save_every = int(getattr(config, "save_every", 0))
         self.eval_episode_num = int(config.eval_episode_num)
+        self.sample_eval_episode_num = int(getattr(config, "sample_eval_episode_num", 0))
         self.video_pred_log = bool(config.video_pred_log)
         self.params_hist_log = bool(config.params_hist_log)
         self.batch_length = int(config.batch_length)
@@ -49,16 +52,13 @@ class OnlineTrainer:
         checkpoint_path = self._checkpoint_dir / f"step_{int(step):08d}.pt"
         torch.save(self._checkpoint_items(agent, step), checkpoint_path)
 
-    def eval(self, agent, train_step):
-        """Run evaluation episodes.
+    def _run_eval_episodes(self, agent, envs, *, deterministic, log_prefix, capture_video=False):
+        """Run evaluation episodes for one policy variant.
 
         Environment stepping is executed on CPU to avoid GPU<->CPU synchronizations
         in the worker processes. Observations are moved back to GPU asynchronously
         (H2D with non_blocking=True) right before policy inference.
         """
-        print("Evaluating the policy...")
-        envs = self.eval_envs
-        agent.eval()
         # (B,)
         done = torch.ones(envs.env_num, dtype=torch.bool, device=agent.device)
         once_done = torch.zeros(envs.env_num, dtype=torch.bool, device=agent.device)
@@ -87,10 +87,10 @@ class OnlineTrainer:
             # Store transition.
             # We keep the observation and the action that produced it together.
             trans["action"] = act
-            if len(cache) < self.batch_length:
+            if capture_video and len(cache) < self.batch_length:
                 cache.append(trans.clone())
             # (B, A)
-            act, agent_state = agent.act(trans, agent_state, eval=True)
+            act, agent_state = agent.act(trans, agent_state, eval=deterministic)
             returns += trans["reward"][:, 0] * ~once_done
             for key, value in trans.items():
                 if key.startswith("log_"):
@@ -99,13 +99,66 @@ class OnlineTrainer:
                     log_metrics[key] += value[:, 0] * ~once_done
             once_done |= done
         # dict of (B, T, *)
-        cache = torch.stack(cache, dim=1) if len(cache) else None
-        self.logger.scalar("episode/eval_score", returns.mean())
-        self.logger.scalar("episode/eval_length", steps.to(torch.float32).mean())
+        return {
+            "score": returns.mean(),
+            "length": steps.to(torch.float32).mean(),
+            "log_metrics": log_metrics,
+            "cache": torch.stack(cache, dim=1) if len(cache) else None,
+            "log_prefix": log_prefix,
+        }
+
+    def _log_eval_result(self, result, *, primary=False):
+        score = result["score"]
+        length = result["length"]
+        log_prefix = result["log_prefix"]
+        log_metrics = result["log_metrics"]
+        cache = result["cache"]
+
+        if primary:
+            self.logger.scalar("episode/eval_score", score)
+            self.logger.scalar("episode/eval_length", length)
+        self.logger.scalar(f"episode/{log_prefix}_score", score)
+        self.logger.scalar(f"episode/{log_prefix}_length", length)
         for key, value in log_metrics.items():
             if key == "log_success":
                 value = torch.clip(value, max=1.0)  # make sure 1.0 for success episode
-            self.logger.scalar(f"episode/eval_{key[4:]}", value.mean())
+            if primary:
+                self.logger.scalar(f"episode/eval_{key[4:]}", value.mean())
+            self.logger.scalar(f"episode/{log_prefix}_{key[4:]}", value.mean())
+        return cache
+
+    def eval(self, agent, train_step):
+        print("Evaluating the policy...")
+        agent.eval()
+
+        mode_result = self._run_eval_episodes(
+            agent,
+            self.eval_envs,
+            deterministic=True,
+            log_prefix="eval_mode",
+            capture_video=True,
+        )
+        cache = self._log_eval_result(mode_result, primary=True)
+
+        if self.sample_eval_episode_num > 0 and self.probe_eval_envs is not None and self.sample_eval_envs is not None:
+            probe_mode_result = self._run_eval_episodes(
+                agent,
+                self.probe_eval_envs,
+                deterministic=True,
+                log_prefix="eval_probe_mode",
+            )
+            sample_result = self._run_eval_episodes(
+                agent,
+                self.sample_eval_envs,
+                deterministic=False,
+                log_prefix="eval_sample",
+            )
+            self._log_eval_result(probe_mode_result)
+            self._log_eval_result(sample_result)
+            gap = sample_result["score"] - probe_mode_result["score"]
+            self.logger.scalar("episode/eval_gap", gap)
+            self.logger.scalar("episode/eval_gap_abs", torch.abs(gap))
+
         if cache is not None and "image" in cache:
             self.logger.video("eval_video", tools.to_np(cache["image"][:1]))
         if self.video_pred_log and cache is not None:

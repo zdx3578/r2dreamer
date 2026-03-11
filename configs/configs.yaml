@@ -35,6 +35,7 @@ trainer:
   eval_every: 1e4
   save_every: 3000
   eval_episode_num: ${env.eval_episode_num}
+  sample_eval_episode_num: 5
   batch_size: ${batch_size}
   batch_length: ${batch_length}
   train_ratio: ${env.train_ratio}

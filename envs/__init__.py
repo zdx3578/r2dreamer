@@ -1,12 +1,16 @@
 from . import parallel, wrappers
 
 
-def make_envs(config):
+def make_parallel_envs(config, env_num):
     def env_constructor(idx):
         return lambda: make_env(config, idx)
 
-    train_envs = parallel.ParallelEnv(env_constructor, config.env_num, config.device)
-    eval_envs = parallel.ParallelEnv(env_constructor, config.eval_episode_num, config.device)
+    return parallel.ParallelEnv(env_constructor, env_num, config.device)
+
+
+def make_envs(config):
+    train_envs = make_parallel_envs(config, config.env_num)
+    eval_envs = make_parallel_envs(config, config.eval_episode_num)
     obs_space = train_envs.observation_space
     act_space = train_envs.action_space
     return train_envs, eval_envs, obs_space, act_space

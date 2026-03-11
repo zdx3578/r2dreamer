@@ -9,7 +9,7 @@ import torch
 import tools
 from buffer import Buffer
 from dreamer import Dreamer
-from envs import make_envs
+from envs import make_envs, make_parallel_envs
 from trainer import OnlineTrainer
 
 warnings.filterwarnings("ignore")
@@ -41,6 +41,11 @@ def main(config):
 
     print("Create envs.")
     train_envs, eval_envs, obs_space, act_space = make_envs(config.env)
+    probe_eval_envs = None
+    sample_eval_envs = None
+    if int(getattr(config.trainer, "sample_eval_episode_num", 0)) > 0:
+        probe_eval_envs = make_parallel_envs(config.env, int(config.trainer.sample_eval_episode_num))
+        sample_eval_envs = make_parallel_envs(config.env, int(config.trainer.sample_eval_episode_num))
 
     print("Simulate agent.")
     agent = Dreamer(
@@ -49,7 +54,16 @@ def main(config):
         act_space,
     ).to(config.device)
 
-    policy_trainer = OnlineTrainer(config.trainer, replay_buffer, logger, logdir, train_envs, eval_envs)
+    policy_trainer = OnlineTrainer(
+        config.trainer,
+        replay_buffer,
+        logger,
+        logdir,
+        train_envs,
+        eval_envs,
+        probe_eval_envs=probe_eval_envs,
+        sample_eval_envs=sample_eval_envs,
+    )
     final_step = policy_trainer.begin(agent)
     policy_trainer.save_latest(agent, final_step)
 
