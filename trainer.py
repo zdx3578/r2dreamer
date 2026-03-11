@@ -7,11 +7,13 @@ class OnlineTrainer:
     def __init__(self, config, replay_buffer, logger, logdir, train_envs, eval_envs):
         self.replay_buffer = replay_buffer
         self.logger = logger
+        self.logdir = logdir
         self.train_envs = train_envs
         self.eval_envs = eval_envs
         self.steps = int(config.steps)
         self.pretrain = int(config.pretrain)
         self.eval_every = int(config.eval_every)
+        self.save_every = int(getattr(config, "save_every", 0))
         self.eval_episode_num = int(config.eval_episode_num)
         self.video_pred_log = bool(config.video_pred_log)
         self.params_hist_log = bool(config.params_hist_log)
@@ -22,7 +24,30 @@ class OnlineTrainer:
         self._should_pretrain = tools.Once()
         self._should_log = tools.Every(config.update_log_every)
         self._should_eval = tools.Every(self.eval_every)
+        self._should_save = tools.Every(self.save_every)
         self._action_repeat = config.action_repeat
+        self._checkpoint_dir = None
+        if self.logdir is not None and self.save_every > 0:
+            self._checkpoint_dir = self.logdir / "checkpoints"
+            self._checkpoint_dir.mkdir(parents=True, exist_ok=True)
+
+    def _checkpoint_items(self, agent, step):
+        return {
+            "step": int(step),
+            "agent_state_dict": agent.state_dict(),
+            "optims_state_dict": tools.recursively_collect_optim_state_dict(agent),
+        }
+
+    def save_latest(self, agent, step):
+        if self.logdir is None:
+            return
+        torch.save(self._checkpoint_items(agent, step), self.logdir / "latest.pt")
+
+    def save_snapshot(self, agent, step):
+        if self._checkpoint_dir is None or step <= 0:
+            return
+        checkpoint_path = self._checkpoint_dir / f"step_{int(step):08d}.pt"
+        torch.save(self._checkpoint_items(agent, step), checkpoint_path)
 
     def eval(self, agent, train_step):
         """Run evaluation episodes.
@@ -122,7 +147,10 @@ class OnlineTrainer:
         while step < self.steps:
             # Evaluation
             if self._should_eval(step) and self.eval_episode_num > 0:
-                self.eval(agent, step)
+                if step > 0:
+                    self.eval(agent, step)
+            if self._should_save(step) and step > 0:
+                self.save_snapshot(agent, step)
             # Save metrics
             if done.any():
                 for i, d in enumerate(done):
@@ -190,3 +218,4 @@ class OnlineTrainer:
                         for name, param in agent._named_params.items():
                             self.logger.histogram(name, tools.to_np(param))
                     self.logger.write(step, fps=True)
+        return step

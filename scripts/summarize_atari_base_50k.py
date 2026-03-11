@@ -26,7 +26,7 @@ def summarize_run(metrics_path: Path):
                 train_points.append(row)
             if "episode/score" in row:
                 train_episodes.append(row)
-            if "episode/eval_score" in row:
+            if "episode/eval_score" in row and row.get("step", 0) != 0:
                 eval_points.append(row)
 
     last_train = train_points[-1] if train_points else {}
@@ -53,7 +53,6 @@ def summarize_run(metrics_path: Path):
         "eval_40kplus_mean": _round(_safe_mean(late_eval_scores)),
         "eval_count": len(eval_points),
     }
-
 
 def collect_runs(base_logdir: Path):
     results = {}
