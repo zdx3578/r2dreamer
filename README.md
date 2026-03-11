@@ -10,26 +10,35 @@ If you prefer Docker, follow [`docs/docker.md`](docs/docker.md).
 
 For the current Atari structured training command and the serial base-50k benchmark scripts, see [`docs/experiment_entrypoints.md`](docs/experiment_entrypoints.md).
 
+Execution rule for this repository:
+
+- Use the repository-local interpreter entrypoint `./.venv/bin/python`.
+- Keep `./.venv` pointing at the one environment you want this repository to use.
+- Avoid mixing `python`, `python3`, `conda activate`, and different user-level environments for the same checkout.
+
 ```bash
-# Installing via a virtual env like uv is recommended.
-pip install -r requirements.txt
+# Example: point .venv at your chosen Python 3.12 environment once.
+ln -sfn /path/to/your/python312_env .venv
+
+# Install dependencies into that environment.
+./.venv/bin/pip install -r requirements.txt
 ```
 
 Run training on default settings:
 
 ```bash
-python3 train.py logdir=./logdir/test
+./.venv/bin/python train.py logdir=./logdir/test
 ```
 
 Run the structured Phase 1A baseline on ARC3:
 
 ```bash
-python3 train.py env=arc3_grid +exp=phase1a_arc3 logdir=./logdir/arc3_test
+./.venv/bin/python train.py env=arc3_grid +exp=phase1a_arc3 logdir=./logdir/arc3_test
 ```
 
 Monitoring results:
 ```bash
-tensorboard --logdir ./logdir
+./.venv/bin/tensorboard --logdir ./logdir
 ```
 
 Switching algorithms:
@@ -37,7 +46,7 @@ Switching algorithms:
 ```bash
 # Choose an algorithm via model.rep_loss:
 # r2dreamer|dreamer|infonce|dreamerpro
-python3 train.py model.rep_loss=r2dreamer
+./.venv/bin/python train.py model.rep_loss=r2dreamer
 ```
 
 For easier code reading, inline tensor shape annotations are provided. See [`docs/tensor_shapes.md`](docs/tensor_shapes.md).
@@ -59,7 +68,7 @@ At the moment, the following benchmarks are available in this repository.
 Use Hydra to select a benchmark and a specific task using `env` and `env.task`, respectively.
 
 ```bash
-python3 train.py ... env=dmc_vision env.task=dmc_walker_walk
+./.venv/bin/python train.py ... env=dmc_vision env.task=dmc_walker_walk
 ```
 
 ## Headless rendering
@@ -80,11 +89,11 @@ More details: [Working with MuJoCo-based environments](https://docs.pytorch.org/
 If you want automatic formatting/basic checks before commits, you can enable `pre-commit`:
 
 ```bash
-pip install pre-commit
+./.venv/bin/pip install pre-commit
 # This sets up a pre-commit hook so that checks are run every time you commit
-pre-commit install
+./.venv/bin/pre-commit install
 # Manual pre-commit run on all files
-pre-commit run --all-files
+./.venv/bin/pre-commit run --all-files
 ```
 
 ## Citation

@@ -5,12 +5,15 @@ This note records the current training entrypoints used for the Atari structured
 ## Environment
 
 - Python `>= 3.12` is required. `train.py` calls `tools.require_python()` on startup and will fail fast on older interpreters.
-- Using the repo virtualenv is recommended:
+- The repository has a single supported command entrypoint:
 
 ```bash
 ./.venv/bin/python train.py ...
 ```
 
+- `./.venv` should be a symlink or virtualenv directory pointing at the one Python 3.12 environment you want this checkout to use.
+- For this repository, do not mix `python`, `python3`, `conda activate`, and multiple environment roots in the same checkout.
+- If you need `pip`, `tensorboard`, or `pre-commit`, invoke them through `./.venv/bin/...` as well.
 - The benchmark scripts assume they are launched from the repository root.
 - Atari 50k runs are typically launched with `device=cuda:0`, `buffer.device=cuda:0`, and `buffer.storage_device=cpu`.
 
