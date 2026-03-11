@@ -103,9 +103,9 @@ r2dreamer:
 phase1a:
   goal_horizon: 3
   use_structure_spatial_recon: True
-  use_structure_change_targets: ${use_direct_spatial_targets}
-  use_local_change_targets: ${use_direct_spatial_targets}
-  use_direct_delta_targets: ${use_direct_spatial_targets}
+  use_structure_change_targets: ${..use_direct_spatial_targets}
+  use_local_change_targets: ${..use_direct_spatial_targets}
+  use_direct_delta_targets: ${..use_direct_spatial_targets}
   direct_target_blend: 0.25
   change_threshold: 0.04
   roi_pool: 3
