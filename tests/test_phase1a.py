@@ -3,6 +3,7 @@ import pathlib
 import unittest
 
 import torch
+import torch.nn.functional as F
 from hydra import compose, initialize_config_dir
 from omegaconf import OmegaConf
 from tensordict import TensorDict
@@ -15,6 +16,13 @@ from utils.slot_matching import soft_slot_alignment
 class BoxSpace:
     def __init__(self, shape):
         self.shape = tuple(shape)
+
+
+class DiscreteSpace:
+    def __init__(self, n):
+        self.n = int(n)
+        self.discrete = True
+        self.shape = (self.n,)
 
 
 class DictSpace:
@@ -341,6 +349,13 @@ def make_batch(obs_tensors, action_dim):
     )
 
 
+def make_discrete_batch(obs_tensors, action_dim):
+    batch = make_batch(obs_tensors, action_dim)
+    action_index = torch.randint(action_dim, batch["action"].shape[:2])
+    batch["action"] = F.one_hot(action_index, num_classes=action_dim).to(torch.float32)
+    return batch
+
+
 class Phase1ATest(unittest.TestCase):
     def _run_case(
         self,
@@ -582,6 +597,28 @@ class Phase1ATest(unittest.TestCase):
         self.assertTrue(bool(cfg.model.use_binding_head))
         self.assertTrue(bool(cfg.model.use_signature_head))
         self.assertTrue(bool(cfg.model.use_rule_update))
+
+    def test_discrete_actor_diagnostics_logged(self):
+        torch.manual_seed(0)
+        config = make_model_config(cnn_keys="^$", mlp_keys="state")
+        obs_space = DictSpace({"state": BoxSpace((6,))})
+        obs = {"state": torch.randn(2, 4, 6)}
+        act_space = DiscreteSpace(4)
+        agent = Dreamer(config, obs_space, act_space)
+        initial_state = agent.get_initial_state(obs["state"].shape[0])
+        replay = FakeReplayBuffer(
+            make_discrete_batch(obs, act_space.n),
+            (initial_state["stoch"], initial_state["deter"]),
+        )
+
+        metrics = agent.update(replay)
+
+        self.assertIn("actor_top1_prob", metrics)
+        self.assertIn("actor_top1_top2_margin", metrics)
+        self.assertIn("actor_margin", metrics)
+        self.assertIn("actor_entropy", metrics)
+        self.assertIn("actor_mode_repeat_rate", metrics)
+        self.assertIn("actor_sample_repeat_rate", metrics)
 
     def test_sinkhorn_slot_alignment_is_doubly_stochastic(self):
         current = torch.tensor([[[1.0, 0.0], [0.0, 1.0]]], dtype=torch.float32)

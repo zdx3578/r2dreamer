@@ -64,6 +64,21 @@ class MultiOneHotDist:
         return sum(_entropies)
 
 
+def discrete_stats(dist):
+    if isinstance(dist, OneHotDist):
+        probs = dist.probs
+        topk = torch.topk(probs, k=min(2, probs.shape[-1]), dim=-1).values
+        top1 = topk[..., 0]
+        top2 = topk[..., 1] if probs.shape[-1] > 1 else torch.zeros_like(top1)
+        return {"top1_prob": top1, "margin": top1 - top2}
+    if isinstance(dist, MultiOneHotDist):
+        stats = [discrete_stats(onehot) for onehot in dist.onehots]
+        top1 = torch.stack([stat["top1_prob"] for stat in stats], dim=-1).mean(dim=-1)
+        margin = torch.stack([stat["margin"] for stat in stats], dim=-1).mean(dim=-1)
+        return {"top1_prob": top1, "margin": margin}
+    return {}
+
+
 class TwoHot:
     def __init__(self, logits, bins, squash=None, unsquash=None):
         # (..., N_bins), (N_bins,)

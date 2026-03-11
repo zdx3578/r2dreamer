@@ -36,6 +36,9 @@ trainer:
   save_every: 3000
   eval_episode_num: ${env.eval_episode_num}
   sample_eval_episode_num: 5
+  eval_gap_checkpoint_threshold: 100.0
+  eval_drop_checkpoint_ratio: 0.5
+  eval_drop_checkpoint_sample_ratio: 0.75
   batch_size: ${batch_size}
   batch_length: ${batch_length}
   train_ratio: ${env.train_ratio}

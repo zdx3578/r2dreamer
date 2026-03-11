@@ -18,6 +18,9 @@ class OnlineTrainer:
         self.save_every = int(getattr(config, "save_every", 0))
         self.eval_episode_num = int(config.eval_episode_num)
         self.sample_eval_episode_num = int(getattr(config, "sample_eval_episode_num", 0))
+        self.eval_gap_checkpoint_threshold = float(getattr(config, "eval_gap_checkpoint_threshold", 0.0))
+        self.eval_drop_checkpoint_ratio = float(getattr(config, "eval_drop_checkpoint_ratio", 0.5))
+        self.eval_drop_checkpoint_sample_ratio = float(getattr(config, "eval_drop_checkpoint_sample_ratio", 0.75))
         self.video_pred_log = bool(config.video_pred_log)
         self.params_hist_log = bool(config.params_hist_log)
         self.batch_length = int(config.batch_length)
@@ -30,7 +33,9 @@ class OnlineTrainer:
         self._should_save = tools.Every(self.save_every)
         self._action_repeat = config.action_repeat
         self._checkpoint_dir = None
-        if self.logdir is not None and self.save_every > 0:
+        self._prev_eval_score = None
+        self._prev_probe_mode_score = None
+        if self.logdir is not None:
             self._checkpoint_dir = self.logdir / "checkpoints"
             self._checkpoint_dir.mkdir(parents=True, exist_ok=True)
 
@@ -50,6 +55,12 @@ class OnlineTrainer:
         if self._checkpoint_dir is None or step <= 0:
             return
         checkpoint_path = self._checkpoint_dir / f"step_{int(step):08d}.pt"
+        torch.save(self._checkpoint_items(agent, step), checkpoint_path)
+
+    def save_eval_alert_snapshot(self, agent, step):
+        if self._checkpoint_dir is None or step <= 0:
+            return
+        checkpoint_path = self._checkpoint_dir / f"eval_alert_step_{int(step):08d}.pt"
         torch.save(self._checkpoint_items(agent, step), checkpoint_path)
 
     def _run_eval_episodes(self, agent, envs, *, deterministic, log_prefix, capture_video=False):
@@ -139,6 +150,11 @@ class OnlineTrainer:
             capture_video=True,
         )
         cache = self._log_eval_result(mode_result, primary=True)
+        eval_score = float(mode_result["score"].detach().cpu())
+        zero_collapse_triggered = 1.0 if self._prev_eval_score is not None and eval_score == 0.0 and self._prev_eval_score > 0 else 0.0
+        gap_triggered = 0.0
+        split_drop_triggered = 0.0
+        checkpoint_saved = 0.0
 
         if self.sample_eval_episode_num > 0 and self.probe_eval_envs is not None and self.sample_eval_envs is not None:
             probe_mode_result = self._run_eval_episodes(
@@ -156,8 +172,31 @@ class OnlineTrainer:
             self._log_eval_result(probe_mode_result)
             self._log_eval_result(sample_result)
             gap = sample_result["score"] - probe_mode_result["score"]
+            gap_abs = torch.abs(gap)
             self.logger.scalar("episode/eval_gap", gap)
-            self.logger.scalar("episode/eval_gap_abs", torch.abs(gap))
+            self.logger.scalar("episode/eval_gap_abs", gap_abs)
+            gap_abs_value = float(gap_abs.detach().cpu())
+            probe_mode_score = float(probe_mode_result["score"].detach().cpu())
+            sample_score = float(sample_result["score"].detach().cpu())
+            gap_triggered = 1.0 if self.eval_gap_checkpoint_threshold > 0 and gap_abs_value >= self.eval_gap_checkpoint_threshold else 0.0
+            if self._prev_probe_mode_score is not None:
+                if (
+                    probe_mode_score <= self._prev_probe_mode_score * self.eval_drop_checkpoint_ratio
+                    and sample_score >= self._prev_probe_mode_score * self.eval_drop_checkpoint_sample_ratio
+                ):
+                    split_drop_triggered = 1.0
+            self._prev_probe_mode_score = probe_mode_score
+
+        if gap_triggered or zero_collapse_triggered or split_drop_triggered:
+            self.save_eval_alert_snapshot(agent, train_step)
+            checkpoint_saved = 1.0
+        self.logger.scalar("episode/eval_gap_checkpoint_saved", checkpoint_saved)
+        self.logger.scalar("episode/eval_zero_collapse_triggered", zero_collapse_triggered)
+        if self.sample_eval_episode_num > 0 and self.probe_eval_envs is not None and self.sample_eval_envs is not None:
+            self.logger.scalar("episode/eval_gap_triggered", gap_triggered)
+            self.logger.scalar("episode/eval_split_drop_triggered", split_drop_triggered)
+
+        self._prev_eval_score = eval_score
 
         if cache is not None and "image" in cache:
             self.logger.video("eval_video", tools.to_np(cache["image"][:1]))

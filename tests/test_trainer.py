@@ -72,6 +72,43 @@ class _FakeParallelEnv:
         return obs, next_done
 
 
+class _FakeScheduledParallelEnv:
+    def __init__(self, reward_schedule):
+        self.env_num = 1
+        self._reward_schedule = [float(reward) for reward in reward_schedule]
+        self._episode_index = 0
+
+    def step(self, action, done):
+        done_flag = bool(done[0].item())
+        if done_flag:
+            obs = TensorDict(
+                {
+                    "reward": torch.tensor([[0.0]], dtype=torch.float32),
+                    "is_first": torch.tensor([[True]], dtype=torch.bool),
+                    "is_last": torch.tensor([[False]], dtype=torch.bool),
+                    "is_terminal": torch.tensor([[False]], dtype=torch.bool),
+                },
+                batch_size=(1,),
+                device="cpu",
+            )
+            next_done = torch.tensor([False], dtype=torch.bool, device="cpu")
+        else:
+            reward = self._reward_schedule[min(self._episode_index, len(self._reward_schedule) - 1)]
+            obs = TensorDict(
+                {
+                    "reward": torch.tensor([[reward]], dtype=torch.float32),
+                    "is_first": torch.tensor([[False]], dtype=torch.bool),
+                    "is_last": torch.tensor([[True]], dtype=torch.bool),
+                    "is_terminal": torch.tensor([[True]], dtype=torch.bool),
+                },
+                batch_size=(1,),
+                device="cpu",
+            )
+            next_done = torch.tensor([True], dtype=torch.bool, device="cpu")
+            self._episode_index += 1
+        return obs, next_done
+
+
 class _FakeAgent(torch.nn.Module):
     def __init__(self):
         super().__init__()
@@ -122,6 +159,9 @@ def _make_config(steps, save_every=0):
         save_every=save_every,
         eval_episode_num=1,
         sample_eval_episode_num=0,
+        eval_gap_checkpoint_threshold=0.0,
+        eval_drop_checkpoint_ratio=0.5,
+        eval_drop_checkpoint_sample_ratio=0.75,
         video_pred_log=False,
         params_hist_log=False,
         batch_length=1,
@@ -190,6 +230,59 @@ class TrainerEvalSchedulingTest(unittest.TestCase):
         self.assertEqual(scalar_map["episode/eval_sample_score"], 2.0)
         self.assertEqual(scalar_map["episode/eval_gap"], 0.0)
         self.assertEqual(scalar_map["episode/eval_gap_abs"], 0.0)
+        self.assertEqual(scalar_map["episode/eval_gap_checkpoint_saved"], 0.0)
+
+    def test_begin_saves_eval_gap_snapshot_when_gap_is_anomalous(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            logdir = Path(tmpdir)
+            logger = _FakeLogger()
+            config = _make_config(steps=2)
+            config.sample_eval_episode_num = 1
+            config.eval_gap_checkpoint_threshold = 3.0
+            trainer = OnlineTrainer(
+                config,
+                _FakeReplayBuffer(),
+                logger,
+                logdir,
+                _FakeParallelEnv(reward_on_step=1.0),
+                _FakeParallelEnv(reward_on_step=2.0),
+                probe_eval_envs=_FakeParallelEnv(reward_on_step=1.0),
+                sample_eval_envs=_FakeParallelEnv(reward_on_step=5.0),
+            )
+            agent = _FakeAgent()
+
+            trainer.begin(agent)
+
+            checkpoint_path = logdir / "checkpoints" / "eval_alert_step_00000001.pt"
+            self.assertTrue(checkpoint_path.exists())
+            scalar_map = dict(logger.scalars)
+            self.assertEqual(scalar_map["episode/eval_gap"], 4.0)
+            self.assertEqual(scalar_map["episode/eval_gap_checkpoint_saved"], 1.0)
+            self.assertEqual(scalar_map["episode/eval_gap_triggered"], 1.0)
+            self.assertEqual(scalar_map["episode/eval_zero_collapse_triggered"], 0.0)
+            self.assertEqual(scalar_map["episode/eval_split_drop_triggered"], 0.0)
+
+    def test_begin_saves_eval_alert_on_zero_collapse_without_sample_probe(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            logdir = Path(tmpdir)
+            logger = _FakeLogger()
+            trainer = OnlineTrainer(
+                _make_config(steps=3),
+                _FakeReplayBuffer(),
+                logger,
+                logdir,
+                _FakeParallelEnv(reward_on_step=1.0),
+                _FakeScheduledParallelEnv(reward_schedule=[2.0, 0.0]),
+            )
+            agent = _FakeAgent()
+
+            trainer.begin(agent)
+
+            checkpoint_path = logdir / "checkpoints" / "eval_alert_step_00000002.pt"
+            self.assertTrue(checkpoint_path.exists())
+            scalar_map = dict(logger.scalars)
+            self.assertEqual(scalar_map["episode/eval_gap_checkpoint_saved"], 1.0)
+            self.assertEqual(scalar_map["episode/eval_zero_collapse_triggered"], 1.0)
 
     def test_begin_saves_periodic_snapshots_for_positive_steps_only(self):
         with tempfile.TemporaryDirectory() as tmpdir:

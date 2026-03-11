@@ -9,6 +9,7 @@ from torch import nn
 from torch.amp import GradScaler, autocast
 from torch.optim.lr_scheduler import LambdaLR
 
+import distributions as dists
 import networks
 import binding_head
 import objectification
@@ -1673,6 +1674,8 @@ class Dreamer(nn.Module):
         metrics["slowval"] = torch.mean(imag_slow_value)
         metrics["weight"] = torch.mean(weight)
         metrics["action_entropy"] = torch.mean(entropy)
+        metrics["actor_entropy"] = metrics["action_entropy"]
+        metrics.update(self._actor_policy_diagnostics(policy, imag_action))
         metrics.update(tools.tensorstats(imag_action, "action"))
 
         # === Replay-based value learning (keep gradients through world model) ===
@@ -1715,6 +1718,32 @@ class Dreamer(nn.Module):
         if value.dim() == 2:
             return value.unsqueeze(-1)
         return value
+
+    def _actor_policy_diagnostics(self, policy, imag_action):
+        stats = dists.discrete_stats(policy)
+        if not stats:
+            return {}
+
+        metrics = {
+            "actor_top1_prob": torch.mean(stats["top1_prob"][:, :-1]),
+            "actor_top1_top2_margin": torch.mean(stats["margin"][:, :-1]),
+        }
+        metrics["actor_margin"] = metrics["actor_top1_top2_margin"]
+
+        mode_action = policy.mode[:, :-1].detach()
+        if mode_action.shape[1] > 1:
+            repeat = (mode_action[:, 1:] == mode_action[:, :-1]).all(dim=-1).to(torch.float32).mean()
+            metrics["actor_mode_repeat_rate"] = repeat
+        else:
+            metrics["actor_mode_repeat_rate"] = torch.tensor(0.0, device=mode_action.device)
+
+        sample_action = imag_action[:, :-1].detach()
+        if sample_action.shape[1] > 1:
+            repeat = (sample_action[:, 1:] == sample_action[:, :-1]).all(dim=-1).to(torch.float32).mean()
+            metrics["actor_sample_repeat_rate"] = repeat
+        else:
+            metrics["actor_sample_repeat_rate"] = torch.tensor(0.0, device=sample_action.device)
+        return metrics
 
     @torch.no_grad()
     def _imagine(self, start, imag_horizon):
