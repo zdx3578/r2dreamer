@@ -44,6 +44,11 @@ class Dreamer(nn.Module):
         self.actor_eval_repeat_threshold = max(1, int(getattr(actor_eval_cfg, "repeat_threshold", 8)))
         self.actor_eval_min_top1_prob = float(getattr(actor_eval_cfg, "min_top1_prob", 0.5))
         self.actor_eval_min_margin = float(getattr(actor_eval_cfg, "min_margin", 0.15))
+        actor_imagination_cfg = getattr(config, "actor_imagination", {})
+        self.actor_imagination_mode_mix = float(getattr(actor_imagination_cfg, "mode_mix", 0.0))
+        self.actor_imagination_mode_mix_ramp_updates = max(
+            1, int(getattr(actor_imagination_cfg, "mode_mix_ramp_updates", 1))
+        )
 
         # World model components
         shapes = {k: tuple(v.shape) for k, v in obs_space.spaces.items()}
@@ -1738,6 +1743,9 @@ class Dreamer(nn.Module):
         metrics["action_entropy"] = torch.mean(entropy)
         metrics["actor_entropy"] = metrics["action_entropy"]
         metrics.update(self._actor_policy_diagnostics(policy, imag_action))
+        metrics["actor_imag_mode_mix"] = torch.tensor(
+            self._actor_imagination_mode_mix_ratio(), device=self.device, dtype=torch.float32
+        )
         metrics.update(tools.tensorstats(imag_action, "action"))
 
         # === Replay-based value learning (keep gradients through world model) ===
@@ -1807,6 +1815,12 @@ class Dreamer(nn.Module):
             metrics["actor_sample_repeat_rate"] = torch.tensor(0.0, device=sample_action.device)
         return metrics
 
+    def _actor_imagination_mode_mix_ratio(self):
+        if not self.act_discrete or self.actor_imagination_mode_mix <= 0:
+            return 0.0
+        progress = min(1.0, float(self._model_updates + 1) / float(self.actor_imagination_mode_mix_ramp_updates))
+        return float(self.actor_imagination_mode_mix) * progress
+
     @torch.no_grad()
     def _imagine(self, start, imag_horizon):
         """Roll out the policy in latent space."""
@@ -1814,11 +1828,18 @@ class Dreamer(nn.Module):
         feats = []
         actions = []
         stoch, deter = start
+        mode_mix_ratio = self._actor_imagination_mode_mix_ratio()
         for _ in range(imag_horizon):
             # (B, F)
             feat = self._frozen_rssm.get_feat(stoch, deter)
             # (B, A)
-            action = self._frozen_actor(feat).rsample()
+            policy = self._frozen_actor(feat)
+            sample_action = policy.rsample()
+            action = sample_action
+            if mode_mix_ratio > 0.0 and self.act_discrete:
+                mode_action = policy.mode
+                mix_mask = torch.rand(feat.shape[0], device=feat.device) < mode_mix_ratio
+                action = torch.where(mix_mask.unsqueeze(-1), mode_action, sample_action)
             # Append feat and its corresponding sampled action at the same time step.
             feats.append(feat)
             actions.append(action)

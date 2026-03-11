@@ -8,6 +8,9 @@ actor_eval:
   repeat_threshold: 8
   min_top1_prob: 0.5
   min_margin: 0.15
+actor_imagination:
+  mode_mix: 0.2
+  mode_mix_ramp_updates: 1000
 compile: True
 log_grads: False
 device: ${device}

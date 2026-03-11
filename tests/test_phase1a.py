@@ -73,6 +73,9 @@ class FakeFrozenRSSM(torch.nn.Module):
         batch = stoch.shape[0]
         return torch.zeros(batch, self.feat_dim, dtype=torch.float32)
 
+    def img_step(self, stoch, deter, action):
+        return stoch, deter
+
 
 class FakeFrozenActor(torch.nn.Module):
     def __init__(self, logits):
@@ -546,6 +549,23 @@ class Phase1ATest(unittest.TestCase):
         torch.testing.assert_close(action[1], torch.tensor([1.0, 0.0, 0.0]))
         self.assertEqual(int(next_state["eval_repeat_count"][0]), 1)
         self.assertEqual(int(next_state["eval_repeat_count"][1]), 2)
+
+    def test_imagination_mode_mix_can_force_greedy_rollout_actions(self):
+        config = make_model_config(cnn_keys="^$", mlp_keys="state")
+        config.actor_imagination = OmegaConf.create({"mode_mix": 1.0, "mode_mix_ramp_updates": 1})
+        obs_space = DictSpace({"state": BoxSpace((6,))})
+        act_space = DiscreteSpace(3)
+        agent = Dreamer(config, obs_space, act_space)
+        agent._frozen_rssm = FakeFrozenRSSM(agent.rssm.feat_size)
+        agent._frozen_actor = FakeFrozenActor([1.2, 1.1, 0.0])
+
+        stoch, deter = agent.rssm.initial(2)
+        _, imag_action = agent._imagine((stoch, deter), imag_horizon=3)
+
+        expected = torch.tensor([1.0, 0.0, 0.0], dtype=torch.float32)
+        for step in range(imag_action.shape[1]):
+            torch.testing.assert_close(imag_action[0, step], expected)
+            torch.testing.assert_close(imag_action[1, step], expected)
 
     def test_arc3_grid_phase1a_update(self):
         obs_space = DictSpace(
