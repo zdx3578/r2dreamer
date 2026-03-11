@@ -31,7 +31,7 @@ export PYTORCH_CUDA_ALLOC_CONF=${PYTORCH_CUDA_ALLOC_CONF:-expandable_segments:Tr
 mkdir -p "$STRUCTURED_DIR"
 cd "$ROOT_DIR"
 
-printf '%s\n' $SEEDS | xargs -n 1 -P "$MAX_PARALLEL" -I '{}' \
+printf '%s\n' $SEEDS | xargs -P "$MAX_PARALLEL" -I '{}' \
   env \
     PYTHON="$PYTHON_BIN" \
     BASE_LOGDIR="$BASE_LOGDIR" \
