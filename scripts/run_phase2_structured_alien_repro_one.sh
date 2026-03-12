@@ -2,6 +2,7 @@
 set -euo pipefail
 
 ROOT_DIR=$(cd "$(dirname "$0")/.." && pwd)
+source "$ROOT_DIR/scripts/git_run_metadata.sh"
 PYTHON_BIN=${PYTHON:-}
 if [ -z "$PYTHON_BIN" ]; then
   if [ -x "$ROOT_DIR/.venv/bin/python" ]; then
@@ -32,34 +33,36 @@ if [ -n "$PROBE_EXTRA_ARGS" ]; then
   read -r -a probe_extra <<<"$PROBE_EXTRA_ARGS"
 fi
 
-echo "[$(date '+%F %T')] seed ${SEED}: train start"
-"$PYTHON_BIN" train.py \
-  env=atari100k \
-  +exp=phase2_structured \
-  logdir="$SEED_DIR" \
-  seed="$SEED" \
-  device=cuda:0 \
-  buffer.device=cuda:0 \
-  buffer.storage_device=cpu \
-  batch_size=4 \
-  batch_length=32 \
-  env.env_num=1 \
-  env.eval_episode_num=20 \
-  env.steps=50000 \
-  env.train_ratio=32 \
-  env.task=atari_alien \
-  trainer.eval_episode_num=20 \
-  trainer.sample_eval_episode_num=5 \
-  trainer.eval_every=5000 \
-  trainer.save_every=3000 \
-  trainer.eval_gap_checkpoint_threshold=100 \
-  trainer.eval_drop_checkpoint_ratio=0.5 \
-  trainer.eval_drop_checkpoint_sample_ratio=0.75 \
-  trainer.pretrain=0 \
-  trainer.update_log_every=1000 \
-  model.compile=False \
-  "${train_extra[@]}" \
-  |& tee "$SEED_DIR/run.out"
+{
+  print_git_run_metadata "$ROOT_DIR" "seed ${SEED} launch"
+  echo "[$(date '+%F %T')] seed ${SEED}: train start"
+  "$PYTHON_BIN" train.py \
+    env=atari100k \
+    +exp=phase2_structured \
+    logdir="$SEED_DIR" \
+    seed="$SEED" \
+    device=cuda:0 \
+    buffer.device=cuda:0 \
+    buffer.storage_device=cpu \
+    batch_size=4 \
+    batch_length=32 \
+    env.env_num=1 \
+    env.eval_episode_num=20 \
+    env.steps=50000 \
+    env.train_ratio=32 \
+    env.task=atari_alien \
+    trainer.eval_episode_num=20 \
+    trainer.sample_eval_episode_num=5 \
+    trainer.eval_every=5000 \
+    trainer.save_every=3000 \
+    trainer.eval_gap_checkpoint_threshold=100 \
+    trainer.eval_drop_checkpoint_ratio=0.5 \
+    trainer.eval_drop_checkpoint_sample_ratio=0.75 \
+    trainer.pretrain=0 \
+    trainer.update_log_every=1000 \
+    model.compile=False \
+    "${train_extra[@]}"
+} |& tee "$SEED_DIR/run.out"
 
 echo "[$(date '+%F %T')] seed ${SEED}: train done"
 if [ -f "$SEED_DIR/latest.pt" ]; then

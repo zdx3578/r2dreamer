@@ -19,6 +19,7 @@ set -euo pipefail
 
 ROOT_DIR=$(cd "$(dirname "$0")/.." && pwd)
 source "$ROOT_DIR/scripts/logdir_naming.sh"
+source "$ROOT_DIR/scripts/git_run_metadata.sh"
 
 PYTHON_BIN=${PYTHON:-}
 if [ -z "$PYTHON_BIN" ]; then
@@ -70,6 +71,8 @@ run_variant() {
 
 mkdir -p "$BASE_LOGDIR"
 cd "$ROOT_DIR"
+
+print_git_run_metadata "$ROOT_DIR" "slot32 pair seed ${SEED} launch"
 
 if [ "$PAIR_PARALLEL" -ge 2 ]; then
   run_variant best_current &
