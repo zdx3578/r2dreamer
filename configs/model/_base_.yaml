@@ -183,6 +183,8 @@ rule_prediction_consumer:
   apply_to_map: False
   apply_to_obj: False
   apply_to_global: True
+  start_updates: 0
+  ramp_updates: 1
 
 structure_decoder:
   hidden: ${model.units}

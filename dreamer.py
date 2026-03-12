@@ -152,6 +152,12 @@ class Dreamer(nn.Module):
         self.rule_prediction_consumer_apply_to_global = bool(
             getattr(rule_prediction_consumer_cfg, "apply_to_global", True)
         )
+        self.rule_prediction_consumer_start_updates = int(
+            getattr(rule_prediction_consumer_cfg, "start_updates", 0)
+        )
+        self.rule_prediction_consumer_ramp_updates = max(
+            1, int(getattr(rule_prediction_consumer_cfg, "ramp_updates", 1))
+        )
         phase2_cfg = getattr(config, "phase2", {})
         self.phase2_m_obj_threshold = float(getattr(phase2_cfg, "m_obj_threshold", 0.2))
         self.phase2_match_margin_threshold = float(getattr(phase2_cfg, "match_margin_threshold", 0.02))
@@ -1436,9 +1442,13 @@ class Dreamer(nn.Module):
         if gate is None:
             gate = torch.ones_like(structured["effect_out"]["delta_global"][..., :1])
         gate = gate.detach()
+        consumer_scale = gate.new_tensor(self._rule_prediction_consumer_scale())
         residual["delta_map"] = residual["delta_map"] * gate.unsqueeze(-1)
         residual["delta_obj"] = residual["delta_obj"] * gate.unsqueeze(-1)
         residual["delta_global"] = residual["delta_global"] * gate
+        residual["delta_map"] = residual["delta_map"] * consumer_scale
+        residual["delta_obj"] = residual["delta_obj"] * consumer_scale
+        residual["delta_global"] = residual["delta_global"] * consumer_scale
         if not self.rule_prediction_consumer_apply_to_map:
             residual["delta_map"] = torch.zeros_like(residual["delta_map"])
         if not self.rule_prediction_consumer_apply_to_obj:
@@ -1459,6 +1469,7 @@ class Dreamer(nn.Module):
         global_residual_abs = residual["delta_global"].abs().mean()
         metrics = {
             "phase2/rule_consumer_enabled": map_residual_abs.new_tensor(1.0),
+            "phase2/rule_consumer_schedule_scale": consumer_scale,
             "phase2/rule_consumer_map_residual_abs": map_residual_abs,
             "phase2/rule_consumer_obj_residual_abs": obj_residual_abs,
             "phase2/rule_consumer_global_residual_abs": global_residual_abs,
@@ -2009,6 +2020,13 @@ class Dreamer(nn.Module):
         ramp_updates = updates - self.actor_imagination_mode_mix_start_updates
         progress = min(1.0, float(ramp_updates) / float(self.actor_imagination_mode_mix_ramp_updates))
         return float(self.actor_imagination_mode_mix) * progress
+
+    def _rule_prediction_consumer_scale(self):
+        updates = self._model_updates + 1
+        if updates <= self.rule_prediction_consumer_start_updates:
+            return 0.0
+        ramp_updates = updates - self.rule_prediction_consumer_start_updates
+        return min(1.0, float(ramp_updates) / float(self.rule_prediction_consumer_ramp_updates))
 
     def _actor_entropy_coeff(self):
         if not self.actor_entropy_decay:

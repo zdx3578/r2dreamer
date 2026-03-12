@@ -650,3 +650,24 @@ For the first rule-consumer stage, the default smoke matrix is:
 1. `20k`
 2. `seed_3/4/5`
 3. `no_prio` vs `no_prio_rule_consumer`
+
+Current rule-consumer versioning:
+
+- `v1`: full `map/obj/global` residual consumer, `residual_scale=0.1`
+  - too aggressive
+  - often increased `mode_minus_raw`
+- `v2`: full `map/obj/global`, `residual_scale=0.03`, plus `* artifact.gate.detach()`
+  - reduced calibration drift
+  - still too invasive on local structure channels
+- `v3`: `global-only`
+  - strong improvement in average deterministic alignment
+  - but `seed_4` still failed the clean `20k` control rerun
+- `v4`: `global-only + late enable`
+  - same residual strength
+  - same gate detachment
+  - delayed activation by update schedule
+  - first validation target is `seed_4 @ 20k`
+
+Promotion rule:
+
+- do not escalate rule-consumer changes to `50k` until `seed_4` stops showing repeated clean `20k` scheduled-eval regression

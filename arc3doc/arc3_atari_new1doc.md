@@ -564,6 +564,33 @@ Phase 1A 当前主要包含两组损失：
 - `no_prio` vs `no_prio_rule_consumer`
 - 先看 `raw_mode / mode / sample_minus_mode / deterministic collapse`
 
+当前 rule-consumer 版本脉络：
+
+- `v1`
+  - 直接对 `delta_map / delta_obj / delta_global` 注入 residual
+  - `residual_scale = 0.1`
+  - 结论：太激进，常把 `mode_minus_raw` 放大
+- `v2`
+  - 保持 `map/obj/global` 注入
+  - `residual_scale = 0.03`
+  - residual 乘 `artifact.gate.detach()`
+  - 结论：校准偏移有所收敛，但局部结构仍被改得过深
+- `v3`
+  - 缩成 `global-only`
+  - 保留 `residual_scale = 0.03`
+  - 保留 `* artifact.gate.detach()`
+  - 结论：平均 deterministic 对齐明显改善，但 `seed_4` clean rerun 仍出现 scheduled-eval 回撤
+- `v4`
+  - 保持 `global-only`
+  - 保持 `residual_scale = 0.03`
+  - 保持 `* artifact.gate.detach()`
+  - 新增 late enable schedule
+  - 目标：验证 `seed_4` 问题是否主要来自 consumer 介入时机过早
+
+当前升级规则：
+
+- 在 `seed_4` 的 clean `20k` 控制实验不稳定之前，不升 `50k`
+
 ---
 
 ## 10. 当前代码状态说明（2026-03 最新）
