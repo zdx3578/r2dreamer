@@ -178,7 +178,7 @@ effect_heads:
 rule_prediction_consumer:
   layers: 1
   hidden: ${model.units}
-  residual_scale: 0.1
+  residual_scale: 0.03
   detach_rule_inputs: True
 
 structure_decoder:

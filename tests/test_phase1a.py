@@ -327,7 +327,7 @@ def make_model_config(
             "rule_prediction_consumer": {
                 "layers": 1,
                 "hidden": 24,
-                "residual_scale": 0.1,
+                "residual_scale": 0.03,
                 "detach_rule_inputs": True,
             },
             "structure_decoder": {"hidden": 24, "temperature": 1.0},

@@ -1423,6 +1423,13 @@ class Dreamer(nn.Module):
             delta_rule_fused = delta_rule_fused.detach()
             rho_next_pred = rho_next_pred.detach()
         residual = self.rule_prediction_consumer(structured["z_eff"], delta_rule_fused, rho_next_pred)
+        gate = getattr(artifact, "gate", None)
+        if gate is None:
+            gate = torch.ones_like(structured["effect_out"]["delta_global"][..., :1])
+        gate = gate.detach()
+        residual["delta_map"] = residual["delta_map"] * gate.unsqueeze(-1)
+        residual["delta_obj"] = residual["delta_obj"] * gate.unsqueeze(-1)
+        residual["delta_global"] = residual["delta_global"] * gate
         effect_out = dict(structured["effect_out"])
         base_delta_map = effect_out["delta_map"]
         base_delta_obj = effect_out["delta_obj"]

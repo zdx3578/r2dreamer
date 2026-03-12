@@ -288,7 +288,7 @@ class RulePredictionConsumer(nn.Module):
         self.obj_slots = int(obj_slots)
         self.obj_dim = int(obj_dim)
         self.global_dim = int(global_dim)
-        self.residual_scale = float(getattr(config, "residual_scale", 0.1))
+        self.residual_scale = float(getattr(config, "residual_scale", 0.03))
         inp_dim = int(latent_dim) + 2 * int(rule_dim)
         self.trunk, out_dim = _build_mlp(inp_dim, int(config.hidden), int(config.layers), act_name, use_norm)
         self.delta_map = nn.Linear(out_dim, self.map_slots * self.map_dim, bias=True)
