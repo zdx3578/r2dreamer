@@ -280,6 +280,40 @@ class EffectHeads(nn.Module):
         }
 
 
+class RulePredictionConsumer(nn.Module):
+    def __init__(self, config, latent_dim, rule_dim, map_slots, map_dim, obj_slots, obj_dim, global_dim, act_name, use_norm):
+        super().__init__()
+        self.map_slots = int(map_slots)
+        self.map_dim = int(map_dim)
+        self.obj_slots = int(obj_slots)
+        self.obj_dim = int(obj_dim)
+        self.global_dim = int(global_dim)
+        self.residual_scale = float(getattr(config, "residual_scale", 0.1))
+        inp_dim = int(latent_dim) + 2 * int(rule_dim)
+        self.trunk, out_dim = _build_mlp(inp_dim, int(config.hidden), int(config.layers), act_name, use_norm)
+        self.delta_map = nn.Linear(out_dim, self.map_slots * self.map_dim, bias=True)
+        self.delta_obj = nn.Linear(out_dim, self.obj_slots * self.obj_dim, bias=True)
+        self.delta_global = nn.Linear(out_dim, self.global_dim, bias=True)
+        self.apply(tools.weight_init_)
+        nn.init.zeros_(self.delta_map.weight)
+        nn.init.zeros_(self.delta_map.bias)
+        nn.init.zeros_(self.delta_obj.weight)
+        nn.init.zeros_(self.delta_obj.bias)
+        nn.init.zeros_(self.delta_global.weight)
+        nn.init.zeros_(self.delta_global.bias)
+
+    def forward(self, z_eff, delta_rule_fused, rho_next_pred):
+        hidden = self.trunk(torch.cat([z_eff, delta_rule_fused, rho_next_pred], dim=-1))
+        batch_shape = z_eff.shape[:-1]
+        return {
+            "delta_map": self.residual_scale
+            * self.delta_map(hidden).reshape(*batch_shape, self.map_slots, self.map_dim),
+            "delta_obj": self.residual_scale
+            * self.delta_obj(hidden).reshape(*batch_shape, self.obj_slots, self.obj_dim),
+            "delta_global": self.residual_scale * self.delta_global(hidden),
+        }
+
+
 class ReachabilityHead(nn.Module):
     def __init__(self, config, feat_dim, map_slots, map_dim, act_name, use_norm):
         super().__init__()

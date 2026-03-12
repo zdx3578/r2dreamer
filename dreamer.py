@@ -103,6 +103,7 @@ class Dreamer(nn.Module):
         self.use_binding_head = bool(getattr(config, "use_binding_head", False))
         self.use_signature_head = bool(getattr(config, "use_signature_head", False))
         self.use_rule_update = bool(getattr(config, "use_rule_update", False))
+        self.use_rule_prediction_consumer = bool(getattr(config, "use_rule_prediction_consumer", False))
         self.use_structure_decoder = bool(getattr(config, "use_structure_decoder", False))
         self.use_local_decoder = bool(getattr(config, "use_local_decoder", False))
         # Keep the old umbrella switch for backwards compatibility, but allow each
@@ -137,6 +138,10 @@ class Dreamer(nn.Module):
             or self.phase1a_use_structure_change_targets
             or self.phase1a_use_local_change_targets
             or self.phase1a_use_direct_delta_targets
+        )
+        rule_prediction_consumer_cfg = getattr(config, "rule_prediction_consumer", {})
+        self.rule_prediction_consumer_detach_rule_inputs = bool(
+            getattr(rule_prediction_consumer_cfg, "detach_rule_inputs", True)
         )
         phase2_cfg = getattr(config, "phase2", {})
         self.phase2_m_obj_threshold = float(getattr(phase2_cfg, "m_obj_threshold", 0.2))
@@ -223,6 +228,8 @@ class Dreamer(nn.Module):
             raise ValueError("Operator bank requires objectification and effect model.")
         if (self.use_binding_head or self.use_signature_head or self.use_rule_update) and not self.use_operator_bank:
             raise ValueError("Binding/signature/rule-update require use_operator_bank=True.")
+        if self.use_rule_prediction_consumer and not (self.use_operator_bank and self.use_effect_model):
+            raise ValueError("Rule prediction consumer requires use_operator_bank=True and use_effect_model=True.")
         if self.use_operator_bank and not (self.use_binding_head and self.use_signature_head and self.use_rule_update):
             raise ValueError("Phase 2 requires operator bank, binding head, signature head, and rule update together.")
 
@@ -334,6 +341,20 @@ class Dreamer(nn.Module):
                 "effect_model": self.effect_model,
                 "effect_heads": self.effect_heads,
             })
+            if self.use_rule_prediction_consumer:
+                self.rule_prediction_consumer = phase1a.RulePredictionConsumer(
+                    config.rule_prediction_consumer,
+                    int(config.effect_model.latent_dim),
+                    self.structured_readout.rule_dim,
+                    self.structured_readout.map_slots,
+                    self.structured_readout.map_dim,
+                    self.structured_readout.obj_slots,
+                    self.structured_readout.obj_dim,
+                    self.structured_readout.global_dim,
+                    config.act,
+                    bool(config.norm),
+                )
+                modules.update({"rule_prediction_consumer": self.rule_prediction_consumer})
             self._loss_scales.setdefault("delta_map", 1.0)
             self._loss_scales.setdefault("delta_obj", 1.0)
             self._loss_scales.setdefault("delta_global", 1.0)
@@ -1072,8 +1093,8 @@ class Dreamer(nn.Module):
 
         return losses, metrics
 
-    def _objectification_losses(self, structured):
-        out = self.objectification(
+    def _objectification_forward(self, structured):
+        return self.objectification(
             structured["current"]["O_t"],
             structured["nxt"]["O_t"],
             structured["z_eff"],
@@ -1081,6 +1102,10 @@ class Dreamer(nn.Module):
             structured["event_target"],
             structured["transition_obj_mask"],
         )
+
+    def _objectification_losses(self, structured, out=None):
+        if out is None:
+            out = self._objectification_forward(structured)
         losses = {
             "obj_stable": out["loss_obj_stable"],
             "obj_local": out["loss_obj_local"],
@@ -1390,6 +1415,39 @@ class Dreamer(nn.Module):
             structured["z_eff"],
             structured["objectification_out"],
         )
+
+    def _apply_rule_prediction_consumer(self, structured, artifact):
+        delta_rule_fused = artifact.delta_rule_fused
+        rho_next_pred = artifact.rho_next_pred
+        if self.rule_prediction_consumer_detach_rule_inputs:
+            delta_rule_fused = delta_rule_fused.detach()
+            rho_next_pred = rho_next_pred.detach()
+        residual = self.rule_prediction_consumer(structured["z_eff"], delta_rule_fused, rho_next_pred)
+        effect_out = dict(structured["effect_out"])
+        base_delta_map = effect_out["delta_map"]
+        base_delta_obj = effect_out["delta_obj"]
+        base_delta_global = effect_out["delta_global"]
+        effect_out["delta_map"] = base_delta_map + residual["delta_map"]
+        effect_out["delta_obj"] = base_delta_obj + residual["delta_obj"]
+        effect_out["delta_global"] = base_delta_global + residual["delta_global"]
+        updated = dict(structured)
+        updated["effect_out"] = effect_out
+        map_residual_abs = residual["delta_map"].abs().mean()
+        obj_residual_abs = residual["delta_obj"].abs().mean()
+        global_residual_abs = residual["delta_global"].abs().mean()
+        metrics = {
+            "phase2/rule_consumer_enabled": map_residual_abs.new_tensor(1.0),
+            "phase2/rule_consumer_map_residual_abs": map_residual_abs,
+            "phase2/rule_consumer_obj_residual_abs": obj_residual_abs,
+            "phase2/rule_consumer_global_residual_abs": global_residual_abs,
+            "phase2/rule_consumer_map_residual_ratio": map_residual_abs
+            / base_delta_map.abs().mean().detach().clamp_min(1e-6),
+            "phase2/rule_consumer_obj_residual_ratio": obj_residual_abs
+            / base_delta_obj.abs().mean().detach().clamp_min(1e-6),
+            "phase2/rule_consumer_global_residual_ratio": global_residual_abs
+            / base_delta_global.abs().mean().detach().clamp_min(1e-6),
+        }
+        return updated, metrics
 
     def _phase2_rollout_prefix(self, horizon):
         names = {2: "two_step", 4: "four_step", 7: "seven_step"}
@@ -1752,16 +1810,15 @@ class Dreamer(nn.Module):
         metrics["rep_entropy"] = torch.mean(self.rssm.get_dist(post_logit).entropy())
         if self.use_structured_readout:
             structured = self._build_structured_context(feat, data, initial, encoder_aux=encoder_aux)
-            phase1a_losses, phase1a_metrics = self._phase1a_losses(structured, data)
-            losses.update(phase1a_losses)
-            metrics.update(phase1a_metrics)
             if self.use_objectification:
-                object_losses, object_metrics, object_out = self._objectification_losses(structured)
-                losses.update(object_losses)
-                metrics.update(object_metrics)
-                structured["objectification_out"] = object_out
+                structured["objectification_out"] = self._objectification_forward(structured)
             if self.use_operator_bank:
                 phase2_art = self._phase2_forward(structured, data)
+                if self.use_rule_prediction_consumer:
+                    structured, consumer_metrics = self._apply_rule_prediction_consumer(structured, phase2_art)
+                    metrics.update(consumer_metrics)
+                    if self.use_objectification:
+                        structured["objectification_out"] = self._objectification_forward(structured)
                 phase2_losses, phase2_metrics = self._phase2_losses(phase2_art, structured)
                 losses.update(phase2_losses)
                 metrics.update(phase2_metrics)
@@ -1770,6 +1827,16 @@ class Dreamer(nn.Module):
                 metrics.update(rollout_metrics)
                 metrics.update(self._phase2_memory_update(phase2_art, structured))
                 metrics.update(self._phase2_update_four_step_curriculum(metrics))
+            phase1a_losses, phase1a_metrics = self._phase1a_losses(structured, data)
+            losses.update(phase1a_losses)
+            metrics.update(phase1a_metrics)
+            if self.use_objectification:
+                object_losses, object_metrics, object_out = self._objectification_losses(
+                    structured, out=structured["objectification_out"]
+                )
+                losses.update(object_losses)
+                metrics.update(object_metrics)
+                structured["objectification_out"] = object_out
             replay_priority = self._replay_priorities(structured)
             if replay_priority is not None:
                 metrics["replay/priority_mean"] = replay_priority.mean()

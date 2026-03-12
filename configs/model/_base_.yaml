@@ -30,6 +30,7 @@ use_operator_bank: False
 use_binding_head: False
 use_signature_head: False
 use_rule_update: False
+use_rule_prediction_consumer: False
 use_structure_decoder: False
 use_local_decoder: False
 use_direct_spatial_targets: False
@@ -173,6 +174,12 @@ effect_model:
 effect_heads:
   layers: 1
   hidden: ${model.units}
+
+rule_prediction_consumer:
+  layers: 1
+  hidden: ${model.units}
+  residual_scale: 0.1
+  detach_rule_inputs: True
 
 structure_decoder:
   hidden: ${model.units}

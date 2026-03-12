@@ -626,6 +626,13 @@ The preferred next step is:
 - let `delta_rule_fused / rho_next_pred` help `delta_map / delta_obj / delta_global`
 - keep actor/value conditioning and planner integration out of scope until this is justified
 
+The minimal first implementation should stay deliberately narrow:
+
+- keep the replay-off development line (`no_prio`) as the only primary baseline
+- add a small residual rule consumer on top of `z_eff`, `delta_rule_fused`, and `rho_next_pred`
+- use it only to correct `delta_map / delta_obj / delta_global`
+- keep planner, actor/value consumers, and replay changes out of scope for this tranche
+
 ### Practical Execution Rule
 
 For any new feature:
@@ -637,3 +644,9 @@ For any new feature:
    - `sample_minus_mode`
    - deterministic collapse frequency
 4. check `current_head` as the ceiling reference before keeping the change
+
+For the first rule-consumer stage, the default smoke matrix is:
+
+1. `20k`
+2. `seed_3/4/5`
+3. `no_prio` vs `no_prio_rule_consumer`

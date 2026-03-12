@@ -1,6 +1,7 @@
 import copy
 import pathlib
 import unittest
+from types import SimpleNamespace
 
 import torch
 import torch.nn.functional as F
@@ -87,7 +88,14 @@ class FakeFrozenActor(torch.nn.Module):
         return dists.OneHotDist(logits)
 
 
-def make_model_config(cnn_keys, mlp_keys, arc3_grid_keys="^$", use_objectification=False, use_phase2=False):
+def make_model_config(
+    cnn_keys,
+    mlp_keys,
+    arc3_grid_keys="^$",
+    use_objectification=False,
+    use_phase2=False,
+    use_rule_prediction_consumer=False,
+):
     return OmegaConf.create(
         {
             "act_entropy": 3e-4,
@@ -110,6 +118,7 @@ def make_model_config(cnn_keys, mlp_keys, arc3_grid_keys="^$", use_objectificati
             "use_binding_head": use_phase2,
             "use_signature_head": use_phase2,
             "use_rule_update": use_phase2,
+            "use_rule_prediction_consumer": use_rule_prediction_consumer,
             "lr": 1e-4,
             "agc": 0.3,
             "pmin": 1e-3,
@@ -315,6 +324,12 @@ def make_model_config(cnn_keys, mlp_keys, arc3_grid_keys="^$", use_objectificati
             },
             "effect_model": {"layers": 2, "hidden": 32, "latent_dim": 24},
             "effect_heads": {"layers": 1, "hidden": 24},
+            "rule_prediction_consumer": {
+                "layers": 1,
+                "hidden": 24,
+                "residual_scale": 0.1,
+                "detach_rule_inputs": True,
+            },
             "structure_decoder": {"hidden": 24, "temperature": 1.0},
             "local_effect_decoder": {"layers": 1, "hidden": 24},
             "reachability_head": {"layers": 1, "hidden": 24},
@@ -413,6 +428,7 @@ class Phase1ATest(unittest.TestCase):
         action_shape=(3,),
         use_objectification=False,
         use_phase2=False,
+        use_rule_prediction_consumer=False,
     ):
         torch.manual_seed(0)
         config = make_model_config(
@@ -421,6 +437,7 @@ class Phase1ATest(unittest.TestCase):
             arc3_grid_keys=arc3_grid_keys,
             use_objectification=use_objectification,
             use_phase2=use_phase2,
+            use_rule_prediction_consumer=use_rule_prediction_consumer,
         )
         restored_config = OmegaConf.create(OmegaConf.to_container(config, resolve=True))
         act_space = BoxSpace(action_shape)
@@ -488,6 +505,12 @@ class Phase1ATest(unittest.TestCase):
             self.assertIn("phase2/rule_memory_write_rate", metrics)
             self.assertIn("phase2/rule_memory_fresh_usage", metrics)
             self.assertIn("phase2/rule_memory_support_mean", metrics)
+            if use_rule_prediction_consumer:
+                self.assertIn("phase2/rule_consumer_enabled", metrics)
+                self.assertIn("phase2/rule_consumer_map_residual_abs", metrics)
+                self.assertIn("phase2/rule_consumer_obj_residual_abs", metrics)
+                self.assertIn("phase2/rule_consumer_global_residual_abs", metrics)
+                self.assertIn("phase2/rule_consumer_map_residual_ratio", metrics)
         self.assertEqual(replay.updated[0].shape[:2], first_obs.shape[:2])
         self.assertEqual(replay.updated[1].shape[:2], first_obs.shape[:2])
         self.assertIsNotNone(replay.updated_priority)
@@ -617,6 +640,57 @@ class Phase1ATest(unittest.TestCase):
             }
         )
         self.assertGreater(float(strong_match_gate), float(match_gate))
+
+    def test_rule_prediction_consumer_is_initially_noop(self):
+        config = make_model_config(
+            cnn_keys="^$",
+            mlp_keys="state",
+            use_objectification=True,
+            use_phase2=True,
+            use_rule_prediction_consumer=True,
+        )
+        obs_space = DictSpace({"state": BoxSpace((6,))})
+        act_space = DiscreteSpace(3)
+        agent = Dreamer(config, obs_space, act_space)
+
+        batch_shape = (2, 4)
+        effect_out = {
+            "delta_map": torch.randn(*batch_shape, agent.structured_readout.map_slots, agent.structured_readout.map_dim),
+            "delta_obj": torch.randn(*batch_shape, agent.structured_readout.obj_slots, agent.structured_readout.obj_dim),
+            "delta_global": torch.randn(*batch_shape, agent.structured_readout.global_dim),
+            "event_logits": torch.randn(*batch_shape, 1),
+        }
+        structured = {
+            "z_eff": torch.randn(*batch_shape, int(config.effect_model.latent_dim)),
+            "effect_out": {key: value.clone() for key, value in effect_out.items()},
+        }
+        artifact = SimpleNamespace(
+            delta_rule_fused=torch.randn(*batch_shape, agent.structured_readout.rule_dim),
+            rho_next_pred=torch.randn(*batch_shape, agent.structured_readout.rule_dim),
+        )
+
+        updated, metrics = agent._apply_rule_prediction_consumer(structured, artifact)
+
+        torch.testing.assert_close(updated["effect_out"]["delta_map"], effect_out["delta_map"])
+        torch.testing.assert_close(updated["effect_out"]["delta_obj"], effect_out["delta_obj"])
+        torch.testing.assert_close(updated["effect_out"]["delta_global"], effect_out["delta_global"])
+        self.assertEqual(float(metrics["phase2/rule_consumer_map_residual_abs"].detach()), 0.0)
+        self.assertEqual(float(metrics["phase2/rule_consumer_obj_residual_abs"].detach()), 0.0)
+        self.assertEqual(float(metrics["phase2/rule_consumer_global_residual_abs"].detach()), 0.0)
+
+    def test_phase2_rule_prediction_consumer_update(self):
+        obs_space = DictSpace({"state": BoxSpace((6,))})
+        obs = {"state": torch.randn(2, 4, 6)}
+        self._run_case(
+            obs_space,
+            obs,
+            cnn_keys="^$",
+            mlp_keys="state",
+            action_shape=(3,),
+            use_objectification=True,
+            use_phase2=True,
+            use_rule_prediction_consumer=True,
+        )
 
     def test_structure_spatial_recon_survives_without_direct_change_targets(self):
         torch.manual_seed(0)

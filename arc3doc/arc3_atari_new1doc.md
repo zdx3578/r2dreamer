@@ -532,6 +532,7 @@ Phase 1A 当前主要包含两组损失：
    - `rho-conditioned structured prediction consumer`
    - 先让 `delta_rule_fused / rho_next_pred` 帮助 `delta_map / delta_obj / delta_global`
    - 暂不直接进入 actor / planner 主推理路径
+   - 第一刀只做 prediction-side residual consumer，保持 replay、planner、actor/value 路径不变
 5. 在此基础上，再决定：
    - 是否继续扩更长 rollout
    - 是否进入更强推理路径
@@ -555,6 +556,13 @@ Phase 1A 当前主要包含两组损失：
 - tri-mode eval
 - eval-state actor diagnostics
 - `mode_mix = 0.0`
+
+当前 rule-consumer 的最小实验口径：
+
+- `20k`
+- `seed_3/4/5`
+- `no_prio` vs `no_prio_rule_consumer`
+- 先看 `raw_mode / mode / sample_minus_mode / deterministic collapse`
 
 ---
 
