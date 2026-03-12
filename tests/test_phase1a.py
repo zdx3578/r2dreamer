@@ -334,6 +334,8 @@ def make_model_config(
                 "apply_to_global": True,
                 "start_updates": 0,
                 "ramp_updates": 1,
+                "gate_enable_mode": "none",
+                "gate_threshold": 0.0,
             },
             "structure_decoder": {"hidden": 24, "temperature": 1.0},
             "local_effect_decoder": {"layers": 1, "hidden": 24},
@@ -784,6 +786,51 @@ class Phase1ATest(unittest.TestCase):
         agent._model_updates = 124
         updated, metrics = agent._apply_rule_prediction_consumer(structured, artifact)
         self.assertAlmostEqual(float(metrics["phase2/rule_consumer_schedule_scale"].detach()), 0.5, places=6)
+        self.assertGreater(float(metrics["phase2/rule_consumer_global_residual_abs"].detach()), 0.0)
+
+    def test_rule_prediction_consumer_phase2_gate_threshold_blocks_until_ready(self):
+        config = make_model_config(
+            cnn_keys="^$",
+            mlp_keys="state",
+            use_objectification=True,
+            use_phase2=True,
+            use_rule_prediction_consumer=True,
+        )
+        config.rule_prediction_consumer.gate_enable_mode = "threshold"
+        config.rule_prediction_consumer.gate_threshold = 0.2
+        obs_space = DictSpace({"state": BoxSpace((6,))})
+        act_space = DiscreteSpace(3)
+        agent = Dreamer(config, obs_space, act_space)
+
+        with torch.no_grad():
+            agent.rule_prediction_consumer.delta_global.bias.fill_(1.0)
+
+        batch_shape = (2, 4)
+        effect_out = {
+            "delta_map": torch.randn(*batch_shape, agent.structured_readout.map_slots, agent.structured_readout.map_dim),
+            "delta_obj": torch.randn(*batch_shape, agent.structured_readout.obj_slots, agent.structured_readout.obj_dim),
+            "delta_global": torch.randn(*batch_shape, agent.structured_readout.global_dim),
+            "event_logits": torch.randn(*batch_shape, 1),
+        }
+        structured = {
+            "z_eff": torch.randn(*batch_shape, int(config.effect_model.latent_dim)),
+            "effect_out": {key: value.clone() for key, value in effect_out.items()},
+        }
+        artifact = SimpleNamespace(
+            delta_rule_fused=torch.randn(*batch_shape, agent.structured_readout.rule_dim),
+            rho_next_pred=torch.randn(*batch_shape, agent.structured_readout.rule_dim),
+            gate=torch.full((*batch_shape, 1), 0.1),
+        )
+
+        updated, metrics = agent._apply_rule_prediction_consumer(structured, artifact)
+        torch.testing.assert_close(updated["effect_out"]["delta_global"], effect_out["delta_global"])
+        self.assertEqual(float(metrics["phase2/rule_consumer_enable_gate"].detach()), 0.0)
+        self.assertEqual(float(metrics["phase2/rule_consumer_effective_scale"].detach()), 0.0)
+
+        artifact.gate = torch.full((*batch_shape, 1), 0.3)
+        updated, metrics = agent._apply_rule_prediction_consumer(structured, artifact)
+        self.assertEqual(float(metrics["phase2/rule_consumer_enable_gate"].detach()), 1.0)
+        self.assertEqual(float(metrics["phase2/rule_consumer_effective_scale"].detach()), 1.0)
         self.assertGreater(float(metrics["phase2/rule_consumer_global_residual_abs"].detach()), 0.0)
 
     def test_structure_spatial_recon_survives_without_direct_change_targets(self):

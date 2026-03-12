@@ -158,6 +158,12 @@ class Dreamer(nn.Module):
         self.rule_prediction_consumer_ramp_updates = max(
             1, int(getattr(rule_prediction_consumer_cfg, "ramp_updates", 1))
         )
+        self.rule_prediction_consumer_gate_enable_mode = str(
+            getattr(rule_prediction_consumer_cfg, "gate_enable_mode", "none")
+        )
+        self.rule_prediction_consumer_gate_threshold = float(
+            getattr(rule_prediction_consumer_cfg, "gate_threshold", 0.0)
+        )
         phase2_cfg = getattr(config, "phase2", {})
         self.phase2_m_obj_threshold = float(getattr(phase2_cfg, "m_obj_threshold", 0.2))
         self.phase2_match_margin_threshold = float(getattr(phase2_cfg, "match_margin_threshold", 0.02))
@@ -1443,12 +1449,23 @@ class Dreamer(nn.Module):
             gate = torch.ones_like(structured["effect_out"]["delta_global"][..., :1])
         gate = gate.detach()
         consumer_scale = gate.new_tensor(self._rule_prediction_consumer_scale())
+        if self.rule_prediction_consumer_gate_enable_mode == "none":
+            enable_gate = torch.ones_like(gate)
+        elif self.rule_prediction_consumer_gate_enable_mode == "scale":
+            enable_gate = gate
+        elif self.rule_prediction_consumer_gate_enable_mode == "threshold":
+            enable_gate = (gate > self.rule_prediction_consumer_gate_threshold).to(gate.dtype)
+        else:
+            raise ValueError(
+                f"Unknown rule_prediction_consumer.gate_enable_mode: {self.rule_prediction_consumer_gate_enable_mode}"
+            )
+        effective_scale = consumer_scale * enable_gate
         residual["delta_map"] = residual["delta_map"] * gate.unsqueeze(-1)
         residual["delta_obj"] = residual["delta_obj"] * gate.unsqueeze(-1)
         residual["delta_global"] = residual["delta_global"] * gate
-        residual["delta_map"] = residual["delta_map"] * consumer_scale
-        residual["delta_obj"] = residual["delta_obj"] * consumer_scale
-        residual["delta_global"] = residual["delta_global"] * consumer_scale
+        residual["delta_map"] = residual["delta_map"] * effective_scale.unsqueeze(-1)
+        residual["delta_obj"] = residual["delta_obj"] * effective_scale.unsqueeze(-1)
+        residual["delta_global"] = residual["delta_global"] * effective_scale
         if not self.rule_prediction_consumer_apply_to_map:
             residual["delta_map"] = torch.zeros_like(residual["delta_map"])
         if not self.rule_prediction_consumer_apply_to_obj:
@@ -1470,6 +1487,8 @@ class Dreamer(nn.Module):
         metrics = {
             "phase2/rule_consumer_enabled": map_residual_abs.new_tensor(1.0),
             "phase2/rule_consumer_schedule_scale": consumer_scale,
+            "phase2/rule_consumer_enable_gate": enable_gate.mean(),
+            "phase2/rule_consumer_effective_scale": effective_scale.mean(),
             "phase2/rule_consumer_map_residual_abs": map_residual_abs,
             "phase2/rule_consumer_obj_residual_abs": obj_residual_abs,
             "phase2/rule_consumer_global_residual_abs": global_residual_abs,

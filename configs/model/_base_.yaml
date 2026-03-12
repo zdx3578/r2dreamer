@@ -185,6 +185,8 @@ rule_prediction_consumer:
   apply_to_global: True
   start_updates: 0
   ramp_updates: 1
+  gate_enable_mode: none
+  gate_threshold: 0.0
 
 structure_decoder:
   hidden: ${model.units}

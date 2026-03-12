@@ -667,6 +667,10 @@ Current rule-consumer versioning:
   - same gate detachment
   - delayed activation by update schedule
   - first validation target is `seed_4 @ 20k`
+- `v5`: `global-only + late enable + phase2 gate threshold`
+  - keep the v4 late schedule
+  - additionally require detached phase2 gate readiness before enabling residuals
+  - first validation targets are `seed_1` and `seed_4`
 
 Promotion rule:
 

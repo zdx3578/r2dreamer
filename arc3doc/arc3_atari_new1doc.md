@@ -586,6 +586,13 @@ Phase 1A 当前主要包含两组损失：
   - 保持 `* artifact.gate.detach()`
   - 新增 late enable schedule
   - 目标：验证 `seed_4` 问题是否主要来自 consumer 介入时机过早
+- `v5`
+  - 保持 `global-only`
+  - 保持 `residual_scale = 0.03`
+  - 保持 `* artifact.gate.detach()`
+  - 保持 late enable
+  - 新增 `phase2 gate` threshold enable
+  - 目标：验证 `seed_4` 问题是否主要来自 phase2 尚未稳定时 consumer 仍然接管过多
 
 当前升级规则：
 
