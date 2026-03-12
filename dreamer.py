@@ -164,6 +164,7 @@ class Dreamer(nn.Module):
         self.rule_prediction_consumer_gate_threshold = float(
             getattr(rule_prediction_consumer_cfg, "gate_threshold", 0.0)
         )
+        self.register_buffer("_rule_prediction_consumer_gate_latched", torch.tensor(0.0, device=self.device))
         phase2_cfg = getattr(config, "phase2", {})
         self.phase2_m_obj_threshold = float(getattr(phase2_cfg, "m_obj_threshold", 0.2))
         self.phase2_match_margin_threshold = float(getattr(phase2_cfg, "match_margin_threshold", 0.02))
@@ -1455,6 +1456,11 @@ class Dreamer(nn.Module):
             enable_gate = gate
         elif self.rule_prediction_consumer_gate_enable_mode == "threshold":
             enable_gate = (gate > self.rule_prediction_consumer_gate_threshold).to(gate.dtype)
+        elif self.rule_prediction_consumer_gate_enable_mode == "sticky_threshold":
+            if float(self._rule_prediction_consumer_gate_latched.detach()) < 0.5:
+                if bool((gate > self.rule_prediction_consumer_gate_threshold).any().item()):
+                    self._rule_prediction_consumer_gate_latched.fill_(1.0)
+            enable_gate = torch.ones_like(gate) * self._rule_prediction_consumer_gate_latched
         else:
             raise ValueError(
                 f"Unknown rule_prediction_consumer.gate_enable_mode: {self.rule_prediction_consumer_gate_enable_mode}"
@@ -1489,6 +1495,7 @@ class Dreamer(nn.Module):
             "phase2/rule_consumer_schedule_scale": consumer_scale,
             "phase2/rule_consumer_enable_gate": enable_gate.mean(),
             "phase2/rule_consumer_effective_scale": effective_scale.mean(),
+            "phase2/rule_consumer_gate_latched": self._rule_prediction_consumer_gate_latched.clone(),
             "phase2/rule_consumer_map_residual_abs": map_residual_abs,
             "phase2/rule_consumer_obj_residual_abs": obj_residual_abs,
             "phase2/rule_consumer_global_residual_abs": global_residual_abs,
