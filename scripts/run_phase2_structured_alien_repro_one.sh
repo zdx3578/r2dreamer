@@ -33,35 +33,42 @@ if [ -n "$PROBE_EXTRA_ARGS" ]; then
   read -r -a probe_extra <<<"$PROBE_EXTRA_ARGS"
 fi
 
+train_cmd=(
+  "$PYTHON_BIN"
+  train.py
+  env=atari100k
+  +exp=phase2_structured
+  "logdir=$SEED_DIR"
+  "seed=$SEED"
+  device=cuda:0
+  buffer.device=cuda:0
+  buffer.storage_device=cpu
+  batch_size=4
+  batch_length=32
+  env.env_num=1
+  env.eval_episode_num=20
+  env.steps=50000
+  env.train_ratio=32
+  env.task=atari_alien
+  trainer.eval_episode_num=20
+  trainer.sample_eval_episode_num=5
+  trainer.eval_every=5000
+  trainer.save_every=3000
+  trainer.eval_gap_checkpoint_threshold=100
+  trainer.eval_drop_checkpoint_ratio=0.5
+  trainer.eval_drop_checkpoint_sample_ratio=0.75
+  trainer.pretrain=0
+  trainer.update_log_every=1000
+  model.compile=False
+)
+if [ "${#train_extra[@]}" -gt 0 ]; then
+  train_cmd+=("${train_extra[@]}")
+fi
+
 {
   print_git_run_metadata "$ROOT_DIR" "seed ${SEED} launch"
   echo "[$(date '+%F %T')] seed ${SEED}: train start"
-  "$PYTHON_BIN" train.py \
-    env=atari100k \
-    +exp=phase2_structured \
-    logdir="$SEED_DIR" \
-    seed="$SEED" \
-    device=cuda:0 \
-    buffer.device=cuda:0 \
-    buffer.storage_device=cpu \
-    batch_size=4 \
-    batch_length=32 \
-    env.env_num=1 \
-    env.eval_episode_num=20 \
-    env.steps=50000 \
-    env.train_ratio=32 \
-    env.task=atari_alien \
-    trainer.eval_episode_num=20 \
-    trainer.sample_eval_episode_num=5 \
-    trainer.eval_every=5000 \
-    trainer.save_every=3000 \
-    trainer.eval_gap_checkpoint_threshold=100 \
-    trainer.eval_drop_checkpoint_ratio=0.5 \
-    trainer.eval_drop_checkpoint_sample_ratio=0.75 \
-    trainer.pretrain=0 \
-    trainer.update_log_every=1000 \
-    model.compile=False \
-    "${train_extra[@]}"
+  "${train_cmd[@]}"
 } |& tee "$SEED_DIR/run.out"
 
 echo "[$(date '+%F %T')] seed ${SEED}: train done"
