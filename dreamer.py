@@ -143,6 +143,15 @@ class Dreamer(nn.Module):
         self.rule_prediction_consumer_detach_rule_inputs = bool(
             getattr(rule_prediction_consumer_cfg, "detach_rule_inputs", True)
         )
+        self.rule_prediction_consumer_apply_to_map = bool(
+            getattr(rule_prediction_consumer_cfg, "apply_to_map", False)
+        )
+        self.rule_prediction_consumer_apply_to_obj = bool(
+            getattr(rule_prediction_consumer_cfg, "apply_to_obj", False)
+        )
+        self.rule_prediction_consumer_apply_to_global = bool(
+            getattr(rule_prediction_consumer_cfg, "apply_to_global", True)
+        )
         phase2_cfg = getattr(config, "phase2", {})
         self.phase2_m_obj_threshold = float(getattr(phase2_cfg, "m_obj_threshold", 0.2))
         self.phase2_match_margin_threshold = float(getattr(phase2_cfg, "match_margin_threshold", 0.02))
@@ -1430,6 +1439,12 @@ class Dreamer(nn.Module):
         residual["delta_map"] = residual["delta_map"] * gate.unsqueeze(-1)
         residual["delta_obj"] = residual["delta_obj"] * gate.unsqueeze(-1)
         residual["delta_global"] = residual["delta_global"] * gate
+        if not self.rule_prediction_consumer_apply_to_map:
+            residual["delta_map"] = torch.zeros_like(residual["delta_map"])
+        if not self.rule_prediction_consumer_apply_to_obj:
+            residual["delta_obj"] = torch.zeros_like(residual["delta_obj"])
+        if not self.rule_prediction_consumer_apply_to_global:
+            residual["delta_global"] = torch.zeros_like(residual["delta_global"])
         effect_out = dict(structured["effect_out"])
         base_delta_map = effect_out["delta_map"]
         base_delta_obj = effect_out["delta_obj"]

@@ -180,6 +180,9 @@ rule_prediction_consumer:
   hidden: ${model.units}
   residual_scale: 0.03
   detach_rule_inputs: True
+  apply_to_map: False
+  apply_to_obj: False
+  apply_to_global: True
 
 structure_decoder:
   hidden: ${model.units}
