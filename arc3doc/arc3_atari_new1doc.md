@@ -393,6 +393,10 @@ Phase 1A 当前主要包含两组损失：
 - 单 seed 成功已不是伪阳性；
 - 但跨 seed 方差仍然较大；
 - 当前仍处在 “promising candidate, not stable baseline” 阶段。
+- 2026-03-12 的 replay rerun 与跨机器复查进一步说明：
+  - `prioritized replay` 是当前最强的不稳定放大器；
+  - `buffer.prioritized=False` 还不是“最终默认解”，但已经足够作为当前开发安全线；
+  - 当前默认主线 `current_head` 仍保留更高 ceiling，因此更适合作为性能参考线，而不是唯一开发基线。
 
 当前已观察到的失败模式至少包括：
 
@@ -499,9 +503,14 @@ Phase 1A 当前主要包含两组损失：
    - 某些 seed 在后期出现 freshness 与 retrieval 共同退化；
 3. **当前 `reach` 仍偏弱**
    - 更接近变化强度 proxy，尚未成为动作条件下的地图可达建模；
-4. **当前 replay 仍是普通 slice replay 主线**
-   - 尚未切换为专门的结构感知多时间尺度 replay；
-5. **当前 Phase 2 shadow rollout 仍未成为主推理消费者**
+4. **当前 replay 是最强不稳定放大器**
+   - 默认 `prioritized replay` 在多轮 `current_head vs no_prio` 对照中反复放大 deterministic collapse 与 rerun variance；
+   - `no_prio` 当前更像开发安全线，`current_head` 更像性能参考线；
+   - `prio_mean / prio_lowalpha` 目前都没有成为稳定折中解。
+5. **当前 `slots32` 容量线不能转正**
+   - `map_slots=32, obj_slots=32` 在 20k 有局部正信号；
+   - 但 50k 三机对照显示它整体放大了 `mode_minus_raw` 与 split，不适合作为当前默认配置。
+6. **当前 Phase 2 shadow rollout 仍未成为主推理消费者**
    - 还没有反向增强 full structured prediction 或 actor / planner 路径。
 
 ---
@@ -510,17 +519,42 @@ Phase 1A 当前主要包含两组损失：
 
 当前最合理的下一步不是增加 planner，不是回 ARC3，也不是继续横向堆新模块，而是：
 
-1. 继续做 **robustness round**
-   - 分开压制：
-     - objectification 偏弱型 seed
-     - freshness / retrieval late-stage collapse 型 seed
-2. 将 sign-off 从“可运行”推进到“更稳的 baseline 候选”
-3. 优先考虑把规则路径从 `rho-only shadow rollout` 推到：
+1. 继续做 **robustness round**，但主线先收窄到双线结构：
+   - 开发安全线：`no_prio`
+   - 性能参考线：`current_head`
+2. 在 replay 结论进一步收稳之前，暂停：
+   - 新 replay knob 扩展
+   - `blend0`
+   - `slots32`
+   - actor 正则 / dynamic schedule / planner
+3. 将 sign-off 从“可运行”推进到“更稳的 baseline 候选”
+4. 优先把规则路径从 `rho-only shadow rollout` 推到：
    - `rho-conditioned structured prediction consumer`
-4. 在此基础上，再决定：
+   - 先让 `delta_rule_fused / rho_next_pred` 帮助 `delta_map / delta_obj / delta_global`
+   - 暂不直接进入 actor / planner 主推理路径
+5. 在此基础上，再决定：
    - 是否继续扩更长 rollout
    - 是否进入更强推理路径
    - 是否回 ARC3
+
+### 当前执行口径（2026-03-12 更新）
+
+当前阶段的实验与开发口径固定为：
+
+- repo 默认配置不立即改成 `no_prio`；
+- 但所有新功能开发，优先在 `no_prio` 线上验证；
+- 同时保留 `current_head` 作为 ceiling / regression reference；
+- 所有新功能先做 `20k` smoke A/B，再升 `50k`。
+
+当前冻结项：
+
+- `direct_target_blend = 0.25`
+- restored Phase1B robustness
+- `match_gate = soft`
+- `four_step_curriculum_warmup_updates = 1500`
+- tri-mode eval
+- eval-state actor diagnostics
+- `mode_mix = 0.0`
 
 ---
 

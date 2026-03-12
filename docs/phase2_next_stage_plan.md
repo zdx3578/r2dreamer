@@ -507,8 +507,10 @@ What is also true now:
 
 Interpretation:
 
-- replay organization is still a plausible future lever for reducing seed variance
-- but replay is not the first thing to change while Phase1B robustness is still the clearest bottleneck
+- replay organization is no longer just a future lever
+- after the `current_head / no_prio` reruns, replay has become the current strongest demonstrated instability amplifier
+- this still does not mean `no_prio` is the final repository default
+- but it does mean `no_prio` is now the most practical development safety line while deterministic collapse and rerun variance are being reduced
 
 ### What To Keep From The Phase1A Critique
 
@@ -542,10 +544,13 @@ Why:
 
 After the current robustness loop, the preferred next-stage order is:
 
-1. continue Phase1B robustness work until `seed2`-style structure weakness is either fixed or cleanly bounded
-2. only then redesign Phase1A `reach` so it consumes stronger action/effect-conditioned structure signals
-3. if seed variance is still large after Phase1B and reach improvements, evaluate replay upgrades such as event-rich or freshness-aware sampling
-4. keep `BindingHead` category expansion out of scope unless later evidence shows a real binding-capacity bottleneck
+1. keep a dual-line evaluation structure:
+   - development safety line: `no_prio`
+   - performance reference line: `current_head`
+2. continue Phase1B robustness work until `seed2`-style structure weakness is either fixed or cleanly bounded
+3. only then redesign Phase1A `reach` so it consumes stronger action/effect-conditioned structure signals
+4. after replay variance is better bounded, revisit replay upgrades such as event-rich or freshness-aware sampling
+5. keep `BindingHead` category expansion out of scope unless later evidence shows a real binding-capacity bottleneck
 
 ### Suggested Reach Redesign Direction
 
@@ -556,3 +561,79 @@ When Phase1A becomes the next active target, the preferred direction is:
 - keep targets proxy-based, but move them closer to map-change or controllable-frontier signals instead of raw latent delta magnitude
 
 This preserves the practical no-external-label setting while making the head more action-conditioned and structurally meaningful.
+
+## Current Closure Update (2026-03-12)
+
+The replay reruns and the `seed_5@2080` control experiment changed the practical execution plan.
+
+### What Is Now Fixed For The Current Stage
+
+Treat the following as frozen unless there is a targeted reason to re-open them:
+
+- `phase1a.direct_target_blend = 0.25`
+- restored Phase1B robustness settings
+- `phase2.match_gate_mode = soft`
+- `phase2.four_step_curriculum_warmup_updates = 1500`
+- tri-mode eval
+- eval-state actor diagnostics
+- `model.actor_imagination.mode_mix = 0.0`
+
+### What Is Now The Minimal Experiment Matrix
+
+Do not keep expanding replay knobs.
+
+For benchmark closure and new feature validation, the active pair is now:
+
+- `current_head`
+- `no_prio`
+
+And the active seed set remains:
+
+- `seed_3`
+- `seed_4`
+- `seed_5`
+
+Interpretation:
+
+- `no_prio` is the current development baseline because it more often reduces deterministic collapse and split severity
+- `current_head` is retained as a ceiling / regression reference
+- `prio_mean`, `prio_lowalpha`, `blend0`, and `slots32` are archived experimental branches for now
+
+### Current Capacity-Line Conclusion
+
+The `map_slots=32 / obj_slots=32` line showed some short-horizon promise at `20k`, but the `50k` three-machine comparison did not support promoting it.
+
+What the current evidence says:
+
+- it can improve some individual runs
+- but it also increases `mode_minus_raw` and split sensitivity
+- so it should not be the current main branch
+
+If capacity is revisited later, use a smaller next step such as:
+
+- `obj_slots=16`
+- or `map_slots=32, obj_slots=16`
+
+and only on top of the `no_prio` development line.
+
+### Immediate Next Functional Target
+
+The next feature target should not be planner work and should not be another replay sweep.
+
+The preferred next step is:
+
+- make the rule path a stronger prediction-side consumer
+- let `delta_rule_fused / rho_next_pred` help `delta_map / delta_obj / delta_global`
+- keep actor/value conditioning and planner integration out of scope until this is justified
+
+### Practical Execution Rule
+
+For any new feature:
+
+1. first run `20k` smoke A/B on `seed_3/4/5`
+2. only then escalate to `50k`
+3. require that the feature does not degrade:
+   - `raw_mode`
+   - `sample_minus_mode`
+   - deterministic collapse frequency
+4. check `current_head` as the ceiling reference before keeping the change
