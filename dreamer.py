@@ -164,7 +164,11 @@ class Dreamer(nn.Module):
         self.rule_prediction_consumer_gate_threshold = float(
             getattr(rule_prediction_consumer_cfg, "gate_threshold", 0.0)
         )
+        self.rule_prediction_consumer_latch_ramp_updates = max(
+            1, int(getattr(rule_prediction_consumer_cfg, "latch_ramp_updates", 1))
+        )
         self.register_buffer("_rule_prediction_consumer_gate_latched", torch.tensor(0.0, device=self.device))
+        self.register_buffer("_rule_prediction_consumer_latch_update", torch.tensor(-1.0, device=self.device))
         phase2_cfg = getattr(config, "phase2", {})
         self.phase2_m_obj_threshold = float(getattr(phase2_cfg, "m_obj_threshold", 0.2))
         self.phase2_match_margin_threshold = float(getattr(phase2_cfg, "match_margin_threshold", 0.02))
@@ -1460,12 +1464,28 @@ class Dreamer(nn.Module):
             if float(self._rule_prediction_consumer_gate_latched.detach()) < 0.5:
                 if bool((gate > self.rule_prediction_consumer_gate_threshold).any().item()):
                     self._rule_prediction_consumer_gate_latched.fill_(1.0)
+                    self._rule_prediction_consumer_latch_update.fill_(float(self._model_updates + 1))
             enable_gate = torch.ones_like(gate) * self._rule_prediction_consumer_gate_latched
         else:
             raise ValueError(
                 f"Unknown rule_prediction_consumer.gate_enable_mode: {self.rule_prediction_consumer_gate_enable_mode}"
             )
-        effective_scale = consumer_scale * enable_gate
+        latch_progress = gate.new_tensor(1.0)
+        if self.rule_prediction_consumer_gate_enable_mode == "sticky_threshold":
+            if float(self._rule_prediction_consumer_gate_latched.detach()) < 0.5:
+                latch_progress = gate.new_tensor(0.0)
+            else:
+                updates = float(self._model_updates + 1)
+                latched_at = float(self._rule_prediction_consumer_latch_update.detach())
+                if latched_at < 0.0:
+                    latch_progress = gate.new_tensor(0.0)
+                else:
+                    progress = min(
+                        1.0,
+                        max(0.0, (updates - latched_at + 1.0) / float(self.rule_prediction_consumer_latch_ramp_updates)),
+                    )
+                    latch_progress = gate.new_tensor(progress)
+        effective_scale = consumer_scale * enable_gate * latch_progress
         residual["delta_map"] = residual["delta_map"] * gate.unsqueeze(-1)
         residual["delta_obj"] = residual["delta_obj"] * gate.unsqueeze(-1)
         residual["delta_global"] = residual["delta_global"] * gate
@@ -1496,6 +1516,7 @@ class Dreamer(nn.Module):
             "phase2/rule_consumer_enable_gate": enable_gate.mean(),
             "phase2/rule_consumer_effective_scale": effective_scale.mean(),
             "phase2/rule_consumer_gate_latched": self._rule_prediction_consumer_gate_latched.clone(),
+            "phase2/rule_consumer_latch_progress": latch_progress.mean(),
             "phase2/rule_consumer_map_residual_abs": map_residual_abs,
             "phase2/rule_consumer_obj_residual_abs": obj_residual_abs,
             "phase2/rule_consumer_global_residual_abs": global_residual_abs,

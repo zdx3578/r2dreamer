@@ -187,6 +187,7 @@ rule_prediction_consumer:
   ramp_updates: 1
   gate_enable_mode: none
   gate_threshold: 0.0
+  latch_ramp_updates: 1
 
 structure_decoder:
   hidden: ${model.units}
