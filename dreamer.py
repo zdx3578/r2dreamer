@@ -57,6 +57,9 @@ class Dreamer(nn.Module):
         self.actor_imagination_mode_mix_ramp_updates = max(
             1, int(getattr(actor_imagination_cfg, "mode_mix_ramp_updates", 1))
         )
+        actor_training_cfg = getattr(config, "actor_training", {})
+        self.actor_mode_gap_weight = float(getattr(actor_training_cfg, "mode_gap_weight", 0.0))
+        self.actor_mode_gap_margin = float(getattr(actor_training_cfg, "mode_gap_margin", 0.0))
 
         # World model components
         shapes = {k: tuple(v.shape) for k, v in obs_space.spaces.items()}
@@ -93,6 +96,7 @@ class Dreamer(nn.Module):
         self._slow_value_updates = 0
 
         self._loss_scales = dict(config.loss_scales)
+        self._loss_scales["mode_gap"] = self.actor_mode_gap_weight
         self._log_grads = bool(config.log_grads)
         self.use_structured_readout = bool(getattr(config, "use_structured_readout", False))
         self.use_effect_model = bool(getattr(config, "use_effect_model", False))
@@ -2036,8 +2040,10 @@ class Dreamer(nn.Module):
             post_deter.reshape(-1, *post_deter.shape[2:]).detach(),
         )
         # (B, T, ...) -> (B*T, ...)
-        imag_feat, imag_action = self._imagine(start, self.imag_horizon + 1)
+        imag_feat, imag_action, imag_state = self._imagine(start, self.imag_horizon + 1, return_states=True)
         imag_feat, imag_action = imag_feat.detach(), imag_action.detach()
+        imag_stoch, imag_deter = imag_state
+        imag_stoch, imag_deter = imag_stoch.detach(), imag_deter.detach()
 
         # (B*T, T_imag, 1)
         imag_reward = self._frozen_reward(imag_feat).mode()
@@ -2064,6 +2070,11 @@ class Dreamer(nn.Module):
         entropy = policy.entropy()[:, :-1].unsqueeze(-1)
         act_entropy_coeff = self._actor_entropy_coeff()
         losses["policy"] = torch.mean(weight[:, :-1].detach() * -(logpi * adv.detach() + act_entropy_coeff * entropy))
+        mode_gap_loss, mode_gap_metrics = self._actor_mode_gap_loss(policy, imag_stoch, imag_deter, weight, disc)
+        metrics.update(mode_gap_metrics)
+        if self.actor_mode_gap_weight > 0.0:
+            losses["mode_gap"] = mode_gap_loss
+            metrics["actor_mode_gap_loss"] = mode_gap_loss.detach()
 
         imag_value_dist = self.value(imag_feat)
         # (B*T, T_imag, 1)
@@ -2173,6 +2184,42 @@ class Dreamer(nn.Module):
         progress = min(1.0, float(ramp_updates) / float(self.actor_imagination_mode_mix_ramp_updates))
         return float(self.actor_imagination_mode_mix) * progress
 
+    def _frozen_action_value_proxy(self, stoch, deter, action, disc):
+        batch, time = action.shape[:2]
+        flat_stoch = stoch.reshape(batch * time, *stoch.shape[2:])
+        flat_deter = deter.reshape(batch * time, *deter.shape[2:])
+        flat_action = action.reshape(batch * time, action.shape[-1])
+        next_stoch, next_deter = self._frozen_rssm.img_step(flat_stoch, flat_deter, flat_action)
+        next_feat = self._frozen_rssm.get_feat(next_stoch, next_deter).reshape(batch, time, -1)
+        next_reward = self._frozen_reward(next_feat).mode()
+        next_cont = self._frozen_cont(next_feat).mean
+        next_value = self._frozen_value(next_feat).mode()
+        return next_reward + disc * next_cont * next_value
+
+    def _actor_mode_gap_loss(self, policy, imag_stoch, imag_deter, weight, disc):
+        sample_action = policy.rsample()
+        mode_action = policy.mode.detach()
+        with torch.no_grad():
+            sample_q = self._frozen_action_value_proxy(imag_stoch[:, :-1], imag_deter[:, :-1], sample_action[:, :-1], disc)
+            mode_q = self._frozen_action_value_proxy(imag_stoch[:, :-1], imag_deter[:, :-1], mode_action[:, :-1], disc)
+            violation = F.relu(sample_q - mode_q - self.actor_mode_gap_margin)
+            active = (violation > 0).to(torch.float32)
+        sample_logpi = policy.log_prob(sample_action.detach())[:, :-1].unsqueeze(-1)
+        loss = torch.mean(weight[:, :-1].detach() * violation.detach() * -sample_logpi)
+        metrics = {
+            "actor_sample_q": torch.mean(sample_q),
+            "actor_mode_q": torch.mean(mode_q),
+            "actor_mode_gap_violation": torch.mean(violation),
+            "actor_mode_gap_active_rate": torch.mean(active),
+            "actor_mode_gap_margin": torch.tensor(
+                self.actor_mode_gap_margin, device=self.device, dtype=torch.float32
+            ),
+            "actor_mode_gap_weight": torch.tensor(
+                self.actor_mode_gap_weight, device=self.device, dtype=torch.float32
+            ),
+        }
+        return loss, metrics
+
     def _rule_prediction_consumer_scale(self):
         updates = self._model_updates + 1
         if updates <= self.rule_prediction_consumer_start_updates:
@@ -2192,14 +2239,18 @@ class Dreamer(nn.Module):
         return float(self.act_entropy) * float(scale)
 
     @torch.no_grad()
-    def _imagine(self, start, imag_horizon):
+    def _imagine(self, start, imag_horizon, return_states=False):
         """Roll out the policy in latent space."""
         # (B, S, K), (B, D)
         feats = []
         actions = []
+        stoch_seq = []
+        deter_seq = []
         stoch, deter = start
         mode_mix_ratio = self._actor_imagination_mode_mix_ratio()
         for _ in range(imag_horizon):
+            stoch_seq.append(stoch)
+            deter_seq.append(deter)
             # (B, F)
             feat = self._frozen_rssm.get_feat(stoch, deter)
             # (B, A)
@@ -2217,7 +2268,11 @@ class Dreamer(nn.Module):
 
         # Stack along sequence dim T_imag.
         # (B, T_imag, F), (B, T_imag, A)
-        return torch.stack(feats, dim=1), torch.stack(actions, dim=1)
+        feat_seq = torch.stack(feats, dim=1)
+        action_seq = torch.stack(actions, dim=1)
+        if not return_states:
+            return feat_seq, action_seq
+        return feat_seq, action_seq, (torch.stack(stoch_seq, dim=1), torch.stack(deter_seq, dim=1))
 
     @torch.no_grad()
     def _lambda_return(self, last, term, reward, value, boot, disc, lamb):

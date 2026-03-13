@@ -296,6 +296,10 @@ def make_model_config(
                 "symlog_inputs": False,
                 "name": "actor",
             },
+            "actor_training": {
+                "mode_gap_weight": 0.0,
+                "mode_gap_margin": 0.0,
+            },
             "critic": {
                 "shape": [255],
                 "layers": 2,
@@ -1118,6 +1122,30 @@ class Phase1ATest(unittest.TestCase):
 
         agent._model_updates = 200
         self.assertAlmostEqual(agent._actor_entropy_coeff(), base * 0.1, places=12)
+
+    def test_mode_gap_metrics_and_loss_are_exposed_when_enabled(self):
+        torch.manual_seed(0)
+        config = make_model_config(cnn_keys="^$", mlp_keys="state")
+        config.actor_training = OmegaConf.create({"mode_gap_weight": 0.2, "mode_gap_margin": 0.05})
+        obs_space = DictSpace({"state": BoxSpace((6,))})
+        act_space = DiscreteSpace(3)
+        agent = Dreamer(config, obs_space, act_space)
+        obs = {"state": torch.randn(2, 4, 6)}
+        initial_state = agent.get_initial_state(2)
+        replay = FakeReplayBuffer(
+            make_discrete_batch(obs, act_space.n),
+            (initial_state["stoch"], initial_state["deter"]),
+        )
+
+        metrics = agent.update(replay)
+
+        self.assertIn("loss/mode_gap", metrics)
+        self.assertIn("actor_sample_q", metrics)
+        self.assertIn("actor_mode_q", metrics)
+        self.assertIn("actor_mode_gap_violation", metrics)
+        self.assertIn("actor_mode_gap_active_rate", metrics)
+        self.assertIn("actor_mode_gap_weight", metrics)
+        self.assertIn("actor_mode_gap_margin", metrics)
 
     def test_arc3_grid_phase1a_update(self):
         obs_space = DictSpace(
