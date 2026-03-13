@@ -331,6 +331,7 @@ def make_model_config(
                 "residual_scale": 0.03,
                 "detach_rule_inputs": True,
                 "detach_aux_on_consistency": True,
+                "consistency_kind": "cosine",
                 "apply_to_map": False,
                 "apply_to_obj": False,
                 "apply_to_global": True,
@@ -1002,6 +1003,12 @@ class Phase1ATest(unittest.TestCase):
         self.assertIn("phase1a/rule_consumer_aux_global_abs", metrics)
         self.assertIn("phase1a/rule_consumer_aux_weight", metrics)
         self.assertIn("phase1a/rule_consumer_consistency_abs", metrics)
+        self.assertIn("phase1a/rule_consumer_aux_target_abs", metrics)
+        self.assertIn("phase1a/rule_consumer_aux_target_cos", metrics)
+        self.assertIn("phase1a/rule_consumer_main_aux_abs", metrics)
+        self.assertIn("phase1a/rule_consumer_main_aux_cos", metrics)
+        self.assertIn("phase1a/rule_consumer_main_target_abs", metrics)
+        self.assertIn("phase1a/rule_consumer_main_target_cos", metrics)
 
         state_dict = copy.deepcopy(agent.state_dict())
         restored = Dreamer(restored_config, obs_space, act_space)

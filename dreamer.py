@@ -147,6 +147,9 @@ class Dreamer(nn.Module):
         self.rule_prediction_consumer_detach_aux_on_consistency = bool(
             getattr(rule_prediction_consumer_cfg, "detach_aux_on_consistency", True)
         )
+        self.rule_prediction_consumer_consistency_kind = str(
+            getattr(rule_prediction_consumer_cfg, "consistency_kind", "cosine")
+        )
         self.rule_prediction_consumer_apply_to_map = bool(
             getattr(rule_prediction_consumer_cfg, "apply_to_map", False)
         )
@@ -262,6 +265,13 @@ class Dreamer(nn.Module):
             raise ValueError("Rule prediction consumer requires use_operator_bank=True and use_effect_model=True.")
         if self.use_rule_prediction_consumer and self.rule_prediction_consumer_mode not in {"residual", "aux"}:
             raise ValueError(f"Unknown rule_prediction_consumer.mode: {self.rule_prediction_consumer_mode}")
+        if self.use_rule_prediction_consumer and self.rule_prediction_consumer_consistency_kind not in {
+            "smooth_l1",
+            "cosine",
+        }:
+            raise ValueError(
+                f"Unknown rule_prediction_consumer.consistency_kind: {self.rule_prediction_consumer_consistency_kind}"
+            )
         if self.use_operator_bank and not (self.use_binding_head and self.use_signature_head and self.use_rule_update):
             raise ValueError("Phase 2 requires operator bank, binding head, signature head, and rule update together.")
 
@@ -978,6 +988,25 @@ class Dreamer(nn.Module):
         denom = weight.sum().clamp_min(1e-6)
         return numer / denom
 
+    def _weighted_mean(self, value, weight=None):
+        if weight is None:
+            return value.mean()
+        weight = weight.to(value.dtype)
+        while weight.dim() < value.dim():
+            weight = weight.unsqueeze(-1)
+        weight = torch.broadcast_to(weight, value.shape)
+        numer = (value * weight).sum()
+        denom = weight.sum().clamp_min(1e-6)
+        return numer / denom
+
+    def _weighted_cosine_metric(self, pred, target, weight=None):
+        cosine = F.cosine_similarity(pred, target, dim=-1, eps=1e-6).unsqueeze(-1)
+        return self._weighted_mean(cosine, weight)
+
+    def _weighted_cosine_distance(self, pred, target, weight=None):
+        cosine = F.cosine_similarity(pred, target, dim=-1, eps=1e-6).unsqueeze(-1)
+        return self._weighted_mean(1.0 - cosine, weight)
+
     def _phase1a_losses(self, structured, data):
         losses = {}
         metrics = {}
@@ -1078,30 +1107,51 @@ class Dreamer(nn.Module):
                     aux_weight = torch.ones_like(structured["transition_valid_ratio"])
                 aux_weight_scalar = aux_weight.squeeze(-1) if aux_weight.dim() > structured["transition_valid_ratio"].dim() else aux_weight
                 aux_valid = structured["transition_valid_ratio"] * aux_weight_scalar
+                aux_delta_global = aux_out["delta_global"]
                 losses["rule_consumer_global_aux"] = self._weighted_loss(
-                    aux_out["delta_global"],
+                    aux_delta_global,
                     target_delta_g,
                     aux_valid,
                     kind="smooth_l1",
                 )
                 consistency_target = (
-                    aux_out["delta_global"].detach()
+                    aux_delta_global.detach()
                     if self.rule_prediction_consumer_detach_aux_on_consistency
-                    else aux_out["delta_global"]
+                    else aux_delta_global
                 )
-                losses["rule_consumer_global_consistency"] = self._weighted_loss(
-                    effect_out["delta_global"],
-                    consistency_target,
-                    aux_valid,
-                    kind="smooth_l1",
+                if self.rule_prediction_consumer_consistency_kind == "cosine":
+                    losses["rule_consumer_global_consistency"] = self._weighted_cosine_distance(
+                        effect_out["delta_global"], consistency_target, aux_valid
+                    )
+                else:
+                    losses["rule_consumer_global_consistency"] = self._weighted_loss(
+                        effect_out["delta_global"],
+                        consistency_target,
+                        aux_valid,
+                        kind="smooth_l1",
+                    )
+                aux_target_abs = (aux_delta_global - target_delta_g).abs()
+                main_aux_abs = (effect_out["delta_global"] - consistency_target).abs()
+                main_target_abs = (effect_out["delta_global"] - target_delta_g).abs()
+                metrics["phase1a/rule_consumer_aux_global_abs"] = self._weighted_mean(
+                    aux_delta_global.abs(), aux_valid
                 )
-                metrics["phase1a/rule_consumer_aux_global_abs"] = (
-                    aux_out["delta_global"].abs() * aux_weight
-                ).mean()
-                metrics["phase1a/rule_consumer_aux_weight"] = aux_weight.mean()
-                metrics["phase1a/rule_consumer_consistency_abs"] = (
-                    (effect_out["delta_global"] - aux_out["delta_global"].detach()).abs() * aux_weight
-                ).mean()
+                metrics["phase1a/rule_consumer_aux_weight"] = self._weighted_mean(aux_weight_scalar)
+                metrics["phase1a/rule_consumer_consistency_abs"] = self._weighted_mean(main_aux_abs, aux_valid)
+                metrics["phase1a/rule_consumer_aux_target_abs"] = self._weighted_mean(aux_target_abs, aux_valid)
+                metrics["phase1a/rule_consumer_aux_target_cos"] = self._weighted_cosine_metric(
+                    aux_delta_global, target_delta_g, aux_valid
+                )
+                metrics["phase1a/rule_consumer_main_aux_abs"] = self._weighted_mean(main_aux_abs, aux_valid)
+                metrics["phase1a/rule_consumer_main_aux_cos"] = self._weighted_cosine_metric(
+                    effect_out["delta_global"], consistency_target, aux_valid
+                )
+                metrics["phase1a/rule_consumer_main_target_abs"] = self._weighted_mean(
+                    main_target_abs, structured["transition_valid_ratio"]
+                )
+                metrics["phase1a/rule_consumer_main_target_cos"] = self._weighted_cosine_metric(
+                    effect_out["delta_global"], target_delta_g, structured["transition_valid_ratio"]
+                )
         if "local_decoder_out" in structured and self.phase1a_use_local_change_targets and direct_spatial_binary is not None:
             local_out = structured["local_decoder_out"]
             local_delta_weight = direct_spatial_weight * (0.25 + direct_spatial_roi)
