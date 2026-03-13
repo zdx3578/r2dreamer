@@ -115,6 +115,9 @@ phase1a:
   direct_target_blend: 0.25
   change_threshold: 0.04
   roi_pool: 3
+  reach_v2:
+    enabled: False
+    condition_action: False
 
 phase2:
   m_obj_threshold: 0.2

@@ -130,6 +130,11 @@ class Dreamer(nn.Module):
         self.phase1a_roi_pool = max(1, int(getattr(phase1a_cfg, "roi_pool", 3)))
         if self.phase1a_roi_pool % 2 == 0:
             self.phase1a_roi_pool += 1
+        reach_v2_cfg = getattr(phase1a_cfg, "reach_v2", {})
+        self.phase1a_reach_v2_enabled = bool(getattr(reach_v2_cfg, "enabled", False))
+        self.phase1a_reach_v2_condition_action = self.phase1a_reach_v2_enabled and bool(
+            getattr(reach_v2_cfg, "condition_action", False)
+        )
         self.phase1a_build_direct_spatial_targets = (
             self.phase1a_use_structure_change_targets
             or self.phase1a_use_local_change_targets
@@ -248,6 +253,7 @@ class Dreamer(nn.Module):
             "obj_rel": float(getattr(objectification_cfg, "obj_rel_early", self._loss_scales.get("obj_rel", 1.0))),
         }
         self._model_updates = 0
+        self.phase1a_direct_change_target_builder = None
 
         if self.use_effect_model and not self.use_structured_readout:
             raise ValueError("Effect model requires use_structured_readout=True.")
@@ -348,6 +354,12 @@ class Dreamer(nn.Module):
             self._loss_scales.setdefault("struct_map", 1.0)
             self._loss_scales.setdefault("struct_obj", 1.0)
             self._loss_scales.setdefault("struct_global", 1.0)
+            if self.phase1a_build_direct_spatial_targets:
+                self.phase1a_direct_change_target_builder = phase1a.DirectChangeTargetBuilder(
+                    phase1a_cfg,
+                    self.structured_readout.map_slots,
+                    self.structured_readout.obj_slots,
+                )
         if self.use_structure_decoder:
             self.structure_decoder = phase1a.SpatialStructureDecoder(
                 config.structure_decoder,
@@ -432,6 +444,8 @@ class Dreamer(nn.Module):
                 self.structured_readout.map_dim,
                 config.act,
                 bool(config.norm),
+                action_dim=self.act_dim,
+                condition_action=self.phase1a_reach_v2_condition_action,
             )
             modules.update({"reachability_head": self.reachability_head})
             self._loss_scales.setdefault("reach", 1.0)
@@ -852,20 +866,16 @@ class Dreamer(nn.Module):
         )
         return metrics
 
-    def _build_structured_context(self, feat, data, initial, encoder_aux=None):
-        initial_feat = self.rssm.get_feat(initial[0], initial[1]).unsqueeze(1)
-        feat_seq = torch.cat([initial_feat, feat], dim=1)
-        valid_mask = data.get("valid_mask")
-        if valid_mask is not None:
-            valid_mask_seq = torch.cat([valid_mask[:, :1], valid_mask], dim=1)
-        else:
-            valid_mask_seq = None
-        spatial = None if encoder_aux is None else encoder_aux.get("spatial")
-        if spatial is not None:
-            spatial_seq = torch.cat([spatial[:, :1], spatial], dim=1)
-        else:
-            spatial_seq = None
-        readouts = self.structured_readout(feat_seq, valid_mask=valid_mask_seq, spatial=spatial_seq)
+    def _empty_phase1a_targets(self):
+        return {
+            "spatial": {},
+            "structure": {},
+            "local": {},
+            "effect": {},
+            "reach": {},
+        }
+
+    def _build_phase1a_static_context(self, feat_seq, readouts, spatial_seq):
         current = {
             "M_t": readouts["M_t"][:, :-1],
             "O_t": readouts["O_t"][:, :-1],
@@ -884,94 +894,154 @@ class Dreamer(nn.Module):
             "obj_mask": readouts["obj_mask"][:, 1:],
             "valid_ratio": readouts["valid_ratio"][:, 1:],
         }
-        structured = {
+        static = {
             "feat_seq": feat_seq,
             "readouts": readouts,
             "current": current,
             "nxt": nxt,
-            "transition_map_mask": (current["map_mask"] * nxt["map_mask"]).detach(),
-            "transition_obj_mask": (current["obj_mask"] * nxt["obj_mask"]).detach(),
-            "transition_valid_ratio": (current["valid_ratio"] * nxt["valid_ratio"]).detach(),
-            "target_delta_g": (nxt["g_t"] - current["g_t"]).detach(),
-            "target_delta_rho": (nxt["rho_t"] - current["rho_t"]).detach(),
             "spatial_seq": spatial_seq,
         }
-        if self.phase1a_build_direct_spatial_targets:
-            structured.update(self._build_direct_spatial_targets(data, spatial_seq, valid_mask_seq))
         if self.use_structure_decoder and spatial_seq is not None and (
             self.phase1a_use_structure_spatial_recon or self.phase1a_use_structure_change_targets
         ):
-            structured["structure_decoder_out"] = self.structure_decoder(
+            static["structure_decoder_out"] = self.structure_decoder(
                 spatial_seq[:, :-1],
                 current["M_t"],
                 current["O_t"],
             )
-            structured["spatial_target"] = spatial_seq[:, :-1].detach()
-        if self.use_effect_model:
-            target_delta_M = (nxt["M_t"] - current["M_t"]).detach()
-            target_delta_O = (nxt["O_t"] - current["O_t"]).detach()
-            z_eff = self.effect_model(feat_seq[:, :-1], data["action"], current["rho_t"])
-            effect_out = self.effect_heads(z_eff)
-            reward_target = self._seq_scalar(data["reward"])
-            terminal_target = self._seq_scalar(data["is_terminal"]).bool()
-            delta_struct = (
-                (target_delta_M.abs() * structured["transition_map_mask"]).mean(dim=(-2, -1))
-                + (target_delta_O.abs() * structured["transition_obj_mask"]).mean(dim=(-2, -1))
-                + (structured["target_delta_g"].abs() * structured["transition_valid_ratio"]).mean(dim=-1)
-            ).unsqueeze(-1)
-            threshold = delta_struct.mean().detach() + 0.5 * delta_struct.std(unbiased=False).detach()
-            explicit_event = reward_target.abs() > 1e-6
-            structural_event = delta_struct > threshold
-            event_target = (explicit_event | terminal_target | structural_event).to(effect_out["event_logits"].dtype)
-            structured.update(
-                {
-                    "z_eff": z_eff,
-                    "effect_out": effect_out,
-                    "target_delta_M": target_delta_M,
-                    "target_delta_O": target_delta_O,
-                    "delta_struct": delta_struct.detach(),
-                    "event_target": event_target,
-                    "reward_target": reward_target,
-                    "terminal_target": terminal_target,
-                }
-            )
-            if self.use_local_decoder and spatial_seq is not None and self.phase1a_use_local_change_targets:
-                structured["local_decoder_out"] = self.local_effect_decoder(spatial_seq[:, :-1], z_eff)
-        return structured
+            static["spatial_target"] = spatial_seq[:, :-1].detach()
+        return static
 
-    def _build_direct_spatial_targets(self, data, spatial_seq, valid_mask_seq):
-        if spatial_seq is None or "image" not in data:
-            return {}
-        image_seq = torch.cat([data["image"][:, :1], data["image"]], dim=1)
-        frame_delta = (image_seq[:, 1:] - image_seq[:, :-1]).abs().mean(dim=-1, keepdim=True)
-        spatial_hw = tuple(map(int, spatial_seq.shape[-3:-1]))
-        batch, steps = frame_delta.shape[:2]
-        flat_delta = frame_delta.reshape(-1, 1, *frame_delta.shape[-3:-1])
-        spatial_change_soft = F.adaptive_avg_pool2d(flat_delta, spatial_hw).reshape(batch, steps, *spatial_hw, 1)
-        spatial_change_binary = (spatial_change_soft > self.phase1a_change_threshold).to(spatial_change_soft.dtype)
-        flat_binary = spatial_change_binary.reshape(-1, 1, *spatial_hw)
-        spatial_roi = F.max_pool2d(
-            flat_binary,
-            kernel_size=self.phase1a_roi_pool,
-            stride=1,
-            padding=self.phase1a_roi_pool // 2,
-        ).reshape(batch, steps, *spatial_hw, 1)
-        if valid_mask_seq is not None:
-            transition_valid = valid_mask_seq[:, :-1].to(spatial_change_soft.dtype) * valid_mask_seq[:, 1:].to(
-                spatial_change_soft.dtype
-            )
-            flat_valid = transition_valid.reshape(-1, 1, *transition_valid.shape[-3:-1])
-            spatial_weight = F.adaptive_avg_pool2d(flat_valid, spatial_hw).reshape(batch, steps, *spatial_hw, 1)
-        else:
-            spatial_weight = torch.ones_like(spatial_change_soft)
-        return {
-            "spatial_change_soft": spatial_change_soft.detach(),
-            "spatial_change_binary": spatial_change_binary.detach(),
-            "spatial_roi": spatial_roi.detach(),
-            "spatial_change_weight": spatial_weight.detach(),
-            "direct_delta_map_target": phase1a._pool_spatial_to_slots(spatial_change_soft, self.structured_readout.map_slots).detach(),
-            "direct_delta_obj_target": phase1a._pool_spatial_to_slots(spatial_change_soft, self.structured_readout.obj_slots).detach(),
+    def _build_phase1a_dynamic_context(self, static, data):
+        current = static["current"]
+        nxt = static["nxt"]
+        dynamic = {
+            "action": data["action"],
+            "transition_map_mask": (current["map_mask"] * nxt["map_mask"]).detach(),
+            "transition_obj_mask": (current["obj_mask"] * nxt["obj_mask"]).detach(),
+            "transition_valid_ratio": (current["valid_ratio"] * nxt["valid_ratio"]).detach(),
+            "target_delta_M": (nxt["M_t"] - current["M_t"]).detach(),
+            "target_delta_O": (nxt["O_t"] - current["O_t"]).detach(),
+            "target_delta_g": (nxt["g_t"] - current["g_t"]).detach(),
+            "target_delta_rho": (nxt["rho_t"] - current["rho_t"]).detach(),
         }
+        reward_target = self._seq_scalar(data["reward"])
+        terminal_target = self._seq_scalar(data["is_terminal"]).bool()
+        delta_struct = (
+            (dynamic["target_delta_M"].abs() * dynamic["transition_map_mask"]).mean(dim=(-2, -1))
+            + (dynamic["target_delta_O"].abs() * dynamic["transition_obj_mask"]).mean(dim=(-2, -1))
+            + (dynamic["target_delta_g"].abs() * dynamic["transition_valid_ratio"]).mean(dim=-1)
+        ).unsqueeze(-1)
+        threshold = delta_struct.mean().detach() + 0.5 * delta_struct.std(unbiased=False).detach()
+        explicit_event = reward_target.abs() > 1e-6
+        structural_event = delta_struct > threshold
+        event_dtype = static["feat_seq"].dtype
+        dynamic.update(
+            {
+                "delta_struct": delta_struct.detach(),
+                "event_target": (explicit_event | terminal_target | structural_event).to(event_dtype),
+                "reward_target": reward_target,
+                "terminal_target": terminal_target,
+            }
+        )
+        if self.use_effect_model:
+            z_eff = self.effect_model(static["feat_seq"][:, :-1], data["action"], current["rho_t"])
+            effect_out = self.effect_heads(z_eff)
+            dynamic["z_eff"] = z_eff
+            dynamic["effect_out"] = effect_out
+            dynamic["event_target"] = dynamic["event_target"].to(effect_out["event_logits"].dtype)
+            if self.use_local_decoder and static["spatial_seq"] is not None and self.phase1a_use_local_change_targets:
+                dynamic["local_decoder_out"] = self.local_effect_decoder(static["spatial_seq"][:, :-1], z_eff)
+        return dynamic
+
+    def _build_phase1a_target_context(self, data, static, valid_mask_seq):
+        if not self.phase1a_build_direct_spatial_targets or self.phase1a_direct_change_target_builder is None:
+            return self._empty_phase1a_targets()
+        return self.phase1a_direct_change_target_builder.build(
+            data.get("image"),
+            static["spatial_seq"],
+            valid_mask_seq=valid_mask_seq,
+        )
+
+    def _build_phase1a_reach_context(self, data, targets):
+        return {
+            "enabled": self.phase1a_reach_v2_enabled,
+            "version": "v2" if self.phase1a_reach_v2_enabled else "v1",
+            "action_conditioned": self.phase1a_reach_v2_condition_action,
+            "action": data["action"] if self.phase1a_reach_v2_condition_action else None,
+            "direct_target": targets["reach"].get("direct_target"),
+        }
+
+    def _phase1a_structured_aliases(self, static, dynamic, targets, reach):
+        aliases = {
+            "feat_seq": static["feat_seq"],
+            "readouts": static["readouts"],
+            "current": static["current"],
+            "nxt": static["nxt"],
+            "spatial_seq": static["spatial_seq"],
+            "transition_map_mask": dynamic["transition_map_mask"],
+            "transition_obj_mask": dynamic["transition_obj_mask"],
+            "transition_valid_ratio": dynamic["transition_valid_ratio"],
+            "target_delta_M": dynamic["target_delta_M"],
+            "target_delta_O": dynamic["target_delta_O"],
+            "target_delta_g": dynamic["target_delta_g"],
+            "target_delta_rho": dynamic["target_delta_rho"],
+            "delta_struct": dynamic["delta_struct"],
+            "event_target": dynamic["event_target"],
+            "reward_target": dynamic["reward_target"],
+            "terminal_target": dynamic["terminal_target"],
+        }
+        if "z_eff" in dynamic:
+            aliases["z_eff"] = dynamic["z_eff"]
+        if "effect_out" in dynamic:
+            aliases["effect_out"] = dynamic["effect_out"]
+        if "local_decoder_out" in dynamic:
+            aliases["local_decoder_out"] = dynamic["local_decoder_out"]
+        if "structure_decoder_out" in static:
+            aliases["structure_decoder_out"] = static["structure_decoder_out"]
+        if "spatial_target" in static:
+            aliases["spatial_target"] = static["spatial_target"]
+
+        spatial_targets = targets["spatial"]
+        effect_targets = targets["effect"]
+        if "change_soft" in spatial_targets:
+            aliases["spatial_change_soft"] = spatial_targets["change_soft"]
+            aliases["spatial_change_binary"] = spatial_targets["change_binary"]
+            aliases["spatial_roi"] = spatial_targets["roi"]
+            aliases["spatial_change_weight"] = spatial_targets["weight"]
+        if "delta_map_target" in effect_targets:
+            aliases["direct_delta_map_target"] = effect_targets["delta_map_target"]
+            aliases["direct_delta_obj_target"] = effect_targets["delta_obj_target"]
+        if reach.get("direct_target") is not None:
+            aliases["reach_direct_target"] = reach["direct_target"]
+        return aliases
+
+    def _build_structured_context(self, feat, data, initial, encoder_aux=None):
+        initial_feat = self.rssm.get_feat(initial[0], initial[1]).unsqueeze(1)
+        feat_seq = torch.cat([initial_feat, feat], dim=1)
+        valid_mask = data.get("valid_mask")
+        if valid_mask is not None:
+            valid_mask_seq = torch.cat([valid_mask[:, :1], valid_mask], dim=1)
+        else:
+            valid_mask_seq = None
+        spatial = None if encoder_aux is None else encoder_aux.get("spatial")
+        if spatial is not None:
+            spatial_seq = torch.cat([spatial[:, :1], spatial], dim=1)
+        else:
+            spatial_seq = None
+        readouts = self.structured_readout(feat_seq, valid_mask=valid_mask_seq, spatial=spatial_seq)
+        static = self._build_phase1a_static_context(feat_seq, readouts, spatial_seq)
+        dynamic = self._build_phase1a_dynamic_context(static, data)
+        targets = self._build_phase1a_target_context(data, static, valid_mask_seq)
+        reach = self._build_phase1a_reach_context(data, targets)
+        structured = {
+            "static": static,
+            "dynamic": dynamic,
+            "targets": targets,
+            "reach": reach,
+        }
+        structured.update(self._phase1a_structured_aliases(static, dynamic, targets, reach))
+        return structured
 
     def _weighted_loss(self, pred, target, weight=None, kind="mse"):
         if kind == "mse":
@@ -1014,9 +1084,13 @@ class Dreamer(nn.Module):
     def _phase1a_losses(self, structured, data):
         losses = {}
         metrics = {}
-        feat_seq = structured["feat_seq"]
-        readouts = structured["readouts"]
-        current = structured["current"]
+        static = structured["static"]
+        dynamic = structured["dynamic"]
+        targets = structured["targets"]
+        reach = structured["reach"]
+        feat_seq = static["feat_seq"]
+        readouts = static["readouts"]
+        current = static["current"]
         feat_target = feat_seq.detach()
         losses["struct_map"] = self._weighted_loss(readouts["M_recon"], feat_target, readouts["valid_ratio"], kind="mse")
         losses["struct_obj"] = self._weighted_loss(readouts["O_recon"], feat_target, readouts["valid_ratio"], kind="mse")
@@ -1029,88 +1103,92 @@ class Dreamer(nn.Module):
         metrics["phase1a/global_std"] = readouts["g_t"].std()
         metrics["phase1a/rule_std"] = readouts["rho_t"].std()
         metrics["phase1a/slot_carry_confidence"] = readouts["slot_carry_confidence"].mean()
-        direct_spatial_soft = structured.get("spatial_change_soft")
-        direct_spatial_binary = structured.get("spatial_change_binary")
-        direct_spatial_roi = structured.get("spatial_roi")
-        direct_spatial_weight = structured.get("spatial_change_weight")
+        direct_spatial = targets["spatial"]
+        structure_targets = targets["structure"]
+        local_targets = targets["local"]
+        effect_targets = targets["effect"]
+        direct_spatial_soft = direct_spatial.get("change_soft")
+        direct_spatial_binary = direct_spatial.get("change_binary")
+        direct_spatial_roi = direct_spatial.get("roi")
+        direct_spatial_weight = direct_spatial.get("weight")
         if direct_spatial_soft is not None:
             metrics["phase1a/spatial_change_target"] = direct_spatial_soft.mean()
             metrics["phase1a/spatial_roi_target"] = direct_spatial_roi.mean()
-        if "structure_decoder_out" in structured and self.phase1a_use_structure_spatial_recon:
-            decoder_out = structured["structure_decoder_out"]
+        if "structure_decoder_out" in static and self.phase1a_use_structure_spatial_recon:
+            decoder_out = static["structure_decoder_out"]
             losses["spatial_recon"] = self._weighted_loss(
                 decoder_out["spatial_recon"],
-                structured["spatial_target"],
-                direct_spatial_weight if direct_spatial_weight is not None else structured["transition_valid_ratio"],
+                static["spatial_target"],
+                structure_targets.get("spatial_recon_weight", dynamic["transition_valid_ratio"]),
                 kind="mse",
             )
         if (
-            "structure_decoder_out" in structured
+            "structure_decoder_out" in static
             and self.phase1a_use_structure_change_targets
             and direct_spatial_binary is not None
         ):
-            decoder_out = structured["structure_decoder_out"]
+            decoder_out = static["structure_decoder_out"]
             losses["region_map"] = self._weighted_loss(
                 decoder_out["region_logits"],
-                direct_spatial_binary,
+                structure_targets["region_map_target"],
                 direct_spatial_weight,
                 kind="bce",
             )
             losses["slot_mask"] = self._weighted_loss(
                 decoder_out["slot_foreground_logits"],
-                direct_spatial_roi,
+                structure_targets["slot_mask_target"],
                 direct_spatial_weight,
                 kind="bce",
             )
             metrics["phase1a/region_map_pred"] = decoder_out["region_map"].mean()
             metrics["phase1a/slot_foreground_pred"] = decoder_out["slot_mask"].amax(dim=-1, keepdim=True).mean()
 
-        target_delta_g = structured["target_delta_g"]
+        target_delta_g = dynamic["target_delta_g"]
         if self.use_effect_model:
-            target_delta_M = structured["target_delta_M"]
-            target_delta_O = structured["target_delta_O"]
-            effect_out = structured["effect_out"]
+            target_delta_M = dynamic["target_delta_M"]
+            target_delta_O = dynamic["target_delta_O"]
+            effect_out = dynamic["effect_out"]
 
             losses["delta_map"] = self._weighted_loss(
-                effect_out["delta_map"], target_delta_M, structured["transition_map_mask"], kind="smooth_l1"
+                effect_out["delta_map"], target_delta_M, dynamic["transition_map_mask"], kind="smooth_l1"
             )
             losses["delta_obj"] = self._weighted_loss(
-                effect_out["delta_obj"], target_delta_O, structured["transition_obj_mask"], kind="smooth_l1"
+                effect_out["delta_obj"], target_delta_O, dynamic["transition_obj_mask"], kind="smooth_l1"
             )
             losses["delta_global"] = self._weighted_loss(
-                effect_out["delta_global"], target_delta_g, structured["transition_valid_ratio"], kind="smooth_l1"
+                effect_out["delta_global"], target_delta_g, dynamic["transition_valid_ratio"], kind="smooth_l1"
             )
-            event_target = structured["event_target"]
+            event_target = dynamic["event_target"]
             losses["event"] = F.binary_cross_entropy_with_logits(effect_out["event_logits"], event_target)
 
-            metrics["phase1a/delta_map_abs"] = (target_delta_M.abs() * structured["transition_map_mask"]).mean()
-            metrics["phase1a/delta_obj_abs"] = (target_delta_O.abs() * structured["transition_obj_mask"]).mean()
-            metrics["phase1a/delta_global_abs"] = (target_delta_g.abs() * structured["transition_valid_ratio"]).mean()
+            metrics["phase1a/delta_map_abs"] = (target_delta_M.abs() * dynamic["transition_map_mask"]).mean()
+            metrics["phase1a/delta_obj_abs"] = (target_delta_O.abs() * dynamic["transition_obj_mask"]).mean()
+            metrics["phase1a/delta_global_abs"] = (target_delta_g.abs() * dynamic["transition_valid_ratio"]).mean()
             metrics["phase1a/event_rate"] = event_target.mean()
             if direct_spatial_soft is not None and self.phase1a_use_direct_delta_targets:
                 pred_delta_map_mag = effect_out["delta_map"].abs().mean(dim=-1, keepdim=True)
                 pred_delta_obj_mag = effect_out["delta_obj"].abs().mean(dim=-1, keepdim=True)
                 losses["delta_map_direct"] = self._weighted_loss(
                     pred_delta_map_mag,
-                    structured["direct_delta_map_target"],
-                    structured["transition_map_mask"],
+                    effect_targets["delta_map_target"],
+                    dynamic["transition_map_mask"],
                     kind="smooth_l1",
                 )
                 losses["delta_obj_direct"] = self._weighted_loss(
                     pred_delta_obj_mag,
-                    structured["direct_delta_obj_target"],
-                    structured["transition_obj_mask"],
+                    effect_targets["delta_obj_target"],
+                    dynamic["transition_obj_mask"],
                     kind="smooth_l1",
                 )
-                metrics["phase1a/direct_delta_map_target"] = structured["direct_delta_map_target"].mean()
-                metrics["phase1a/direct_delta_obj_target"] = structured["direct_delta_obj_target"].mean()
+                metrics["phase1a/direct_delta_map_target"] = effect_targets["delta_map_target"].mean()
+                metrics["phase1a/direct_delta_obj_target"] = effect_targets["delta_obj_target"].mean()
             aux_out = structured.get("rule_prediction_consumer_aux_out")
             aux_weight = structured.get("rule_prediction_consumer_aux_weight")
             if aux_out is not None:
                 if aux_weight is None:
-                    aux_weight = torch.ones_like(structured["transition_valid_ratio"])
-                aux_weight_scalar = aux_weight.squeeze(-1) if aux_weight.dim() > structured["transition_valid_ratio"].dim() else aux_weight
-                aux_valid = structured["transition_valid_ratio"] * aux_weight_scalar
+                    aux_weight = torch.ones_like(dynamic["transition_valid_ratio"])
+                aux_weight_scalar = aux_weight.squeeze(-1) if aux_weight.dim() > dynamic["transition_valid_ratio"].dim() else aux_weight
+                aux_valid = dynamic["transition_valid_ratio"] * aux_weight_scalar
                 aux_delta_global = aux_out["delta_global"]
                 losses["rule_consumer_global_aux"] = self._weighted_loss(
                     aux_delta_global,
@@ -1151,30 +1229,29 @@ class Dreamer(nn.Module):
                     effect_out["delta_global"], consistency_target, aux_valid
                 )
                 metrics["phase1a/rule_consumer_main_target_abs"] = self._weighted_mean(
-                    main_target_abs, structured["transition_valid_ratio"]
+                    main_target_abs, dynamic["transition_valid_ratio"]
                 )
                 metrics["phase1a/rule_consumer_main_target_cos"] = self._weighted_cosine_metric(
-                    effect_out["delta_global"], target_delta_g, structured["transition_valid_ratio"]
+                    effect_out["delta_global"], target_delta_g, dynamic["transition_valid_ratio"]
                 )
-        if "local_decoder_out" in structured and self.phase1a_use_local_change_targets and direct_spatial_binary is not None:
-            local_out = structured["local_decoder_out"]
-            local_delta_weight = direct_spatial_weight * (0.25 + direct_spatial_roi)
+        if "local_decoder_out" in dynamic and self.phase1a_use_local_change_targets and direct_spatial_binary is not None:
+            local_out = dynamic["local_decoder_out"]
             losses["local_change"] = self._weighted_loss(
                 local_out["change_logits"],
-                direct_spatial_binary,
+                local_targets["change_target"],
                 direct_spatial_weight,
                 kind="bce",
             )
             losses["local_roi"] = self._weighted_loss(
                 local_out["roi_logits"],
-                direct_spatial_roi,
+                local_targets["roi_target"],
                 direct_spatial_weight,
                 kind="bce",
             )
             losses["local_delta"] = self._weighted_loss(
                 local_out["local_delta"],
-                direct_spatial_soft,
-                local_delta_weight,
+                local_targets["delta_target"],
+                local_targets["delta_weight"],
                 kind="smooth_l1",
             )
             metrics["phase1a/local_change_pred"] = local_out["change_logits"].sigmoid().mean()
@@ -1183,10 +1260,10 @@ class Dreamer(nn.Module):
 
         feat_delta = (feat_seq[:, 1:] - feat_seq[:, :-1]).detach()
         if self.use_reachability_head:
-            reach_pred = self.reachability_head(feat_seq[:, :-1], current["M_t"])
+            reach_pred = self.reachability_head(feat_seq[:, :-1], current["M_t"], action=reach.get("action"))
             reach_target = torch.tanh(feat_delta.abs().mean(dim=-1, keepdim=True))
-            if direct_spatial_soft is not None:
-                reach_direct = direct_spatial_soft.mean(dim=(-3, -2, -1), keepdim=False).unsqueeze(-1)
+            reach_direct = reach.get("direct_target")
+            if reach_direct is not None:
                 reach_target = (
                     (1.0 - self.phase1a_direct_target_blend) * reach_target
                     + self.phase1a_direct_target_blend * reach_direct.detach()
@@ -1194,6 +1271,12 @@ class Dreamer(nn.Module):
                 metrics["phase1a/reach_direct_target"] = reach_direct.mean()
             losses["reach"] = F.smooth_l1_loss(reach_pred, reach_target)
             metrics["phase1a/reach_target"] = reach_target.mean()
+            metrics["phase1a/reach_v2_enabled"] = torch.tensor(
+                float(reach["enabled"]), device=self.device, dtype=torch.float32
+            )
+            metrics["phase1a/reach_action_conditioned"] = torch.tensor(
+                float(reach["action_conditioned"]), device=self.device, dtype=torch.float32
+            )
 
         if self.use_goal_progress_head:
             goal_pred = self.goal_progress_head(feat_seq[:, :-1], current["g_t"])

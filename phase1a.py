@@ -55,6 +55,81 @@ def _pool_spatial_to_slots(spatial, slots):
     return pooled.reshape(*batch_shape, slots, ch)
 
 
+class DirectChangeTargetBuilder:
+    def __init__(self, config, map_slots, obj_slots):
+        self.map_slots = int(map_slots)
+        self.obj_slots = int(obj_slots)
+        self.change_threshold = float(getattr(config, "change_threshold", 0.04))
+        self.roi_pool = max(1, int(getattr(config, "roi_pool", 3)))
+        if self.roi_pool % 2 == 0:
+            self.roi_pool += 1
+
+    def build(self, image_obs, spatial_seq, valid_mask_seq=None):
+        targets = {
+            "spatial": {},
+            "structure": {},
+            "local": {},
+            "effect": {},
+            "reach": {},
+        }
+        if spatial_seq is None or image_obs is None:
+            return targets
+
+        image_seq = torch.cat([image_obs[:, :1], image_obs], dim=1)
+        frame_delta = (image_seq[:, 1:] - image_seq[:, :-1]).abs().mean(dim=-1, keepdim=True)
+        spatial_hw = tuple(map(int, spatial_seq.shape[-3:-1]))
+        batch, steps = frame_delta.shape[:2]
+        flat_delta = frame_delta.reshape(-1, 1, *frame_delta.shape[-3:-1])
+        spatial_change_soft = F.adaptive_avg_pool2d(flat_delta, spatial_hw).reshape(batch, steps, *spatial_hw, 1)
+        spatial_change_binary = (spatial_change_soft > self.change_threshold).to(spatial_change_soft.dtype)
+        flat_binary = spatial_change_binary.reshape(-1, 1, *spatial_hw)
+        spatial_roi = F.max_pool2d(
+            flat_binary,
+            kernel_size=self.roi_pool,
+            stride=1,
+            padding=self.roi_pool // 2,
+        ).reshape(batch, steps, *spatial_hw, 1)
+        if valid_mask_seq is not None:
+            transition_valid = valid_mask_seq[:, :-1].to(spatial_change_soft.dtype) * valid_mask_seq[:, 1:].to(
+                spatial_change_soft.dtype
+            )
+            flat_valid = transition_valid.reshape(-1, 1, *transition_valid.shape[-3:-1])
+            spatial_weight = F.adaptive_avg_pool2d(flat_valid, spatial_hw).reshape(batch, steps, *spatial_hw, 1)
+        else:
+            spatial_weight = torch.ones_like(spatial_change_soft)
+
+        direct_delta_map = _pool_spatial_to_slots(spatial_change_soft, self.map_slots).detach()
+        direct_delta_obj = _pool_spatial_to_slots(spatial_change_soft, self.obj_slots).detach()
+        local_delta_weight = (spatial_weight * (0.25 + spatial_roi)).detach()
+        reach_direct = spatial_change_soft.mean(dim=(-3, -2, -1), keepdim=False).unsqueeze(-1).detach()
+
+        targets["spatial"] = {
+            "change_soft": spatial_change_soft.detach(),
+            "change_binary": spatial_change_binary.detach(),
+            "roi": spatial_roi.detach(),
+            "weight": spatial_weight.detach(),
+        }
+        targets["structure"] = {
+            "spatial_recon_weight": spatial_weight.detach(),
+            "region_map_target": spatial_change_binary.detach(),
+            "slot_mask_target": spatial_roi.detach(),
+        }
+        targets["local"] = {
+            "change_target": spatial_change_binary.detach(),
+            "roi_target": spatial_roi.detach(),
+            "delta_target": spatial_change_soft.detach(),
+            "delta_weight": local_delta_weight,
+        }
+        targets["effect"] = {
+            "delta_map_target": direct_delta_map,
+            "delta_obj_target": direct_delta_obj,
+        }
+        targets["reach"] = {
+            "direct_target": reach_direct,
+        }
+        return targets
+
+
 class StructuredReadout(nn.Module):
     def __init__(self, config, feat_dim, act_name, use_norm, spatial_shape=None):
         super().__init__()
@@ -315,15 +390,22 @@ class RulePredictionConsumer(nn.Module):
 
 
 class ReachabilityHead(nn.Module):
-    def __init__(self, config, feat_dim, map_slots, map_dim, act_name, use_norm):
+    def __init__(self, config, feat_dim, map_slots, map_dim, act_name, use_norm, action_dim=0, condition_action=False):
         super().__init__()
-        inp_dim = int(feat_dim) + int(map_slots) * int(map_dim)
+        self.condition_action = bool(condition_action)
+        self.action_dim = int(action_dim) if self.condition_action else 0
+        inp_dim = int(feat_dim) + int(map_slots) * int(map_dim) + self.action_dim
         self.trunk, out_dim = _build_mlp(inp_dim, int(config.hidden), int(config.layers), act_name, use_norm)
         self.out = nn.Linear(out_dim, 1, bias=True)
         self.apply(tools.weight_init_)
 
-    def forward(self, feat, M_t):
-        x = torch.cat([feat, M_t.reshape(*M_t.shape[:-2], -1)], dim=-1)
+    def forward(self, feat, M_t, action=None):
+        inputs = [feat, M_t.reshape(*M_t.shape[:-2], -1)]
+        if self.condition_action:
+            if action is None:
+                action = torch.zeros(*feat.shape[:-1], self.action_dim, device=feat.device, dtype=feat.dtype)
+            inputs.append(action.to(feat.dtype))
+        x = torch.cat(inputs, dim=-1)
         return self.out(self.trunk(x))
 
 

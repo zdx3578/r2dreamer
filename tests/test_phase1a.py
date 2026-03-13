@@ -173,6 +173,10 @@ def make_model_config(
                 "use_local_change_targets": False,
                 "use_direct_delta_targets": False,
                 "direct_target_blend": 0.25,
+                "reach_v2": {
+                    "enabled": False,
+                    "condition_action": False,
+                },
                 "reach_horizon": 4,
                 "event_ema_decay": 0.99,
                 "event_threshold_scale": 1.0,
@@ -554,6 +558,13 @@ class Phase1ATest(unittest.TestCase):
             "goal_progress_head.out.weight",
         ):
             torch.testing.assert_close(state_dict[key], restored.state_dict()[key])
+
+    def _build_structured(self, agent, batch, initial):
+        batch = agent.preprocess(batch)
+        embed, encoder_aux = agent.encoder(batch, return_aux=True)
+        post_stoch, post_deter, _ = agent.rssm.observe(embed, batch["action"], initial, batch["is_first"])
+        feat = agent.rssm.get_feat(post_stoch, post_deter)
+        return agent._build_structured_context(feat, batch, initial, encoder_aux=encoder_aux)
 
     def test_image_obs_phase1a_update(self):
         obs_space = DictSpace({"image": BoxSpace((16, 16, 3))})
@@ -1066,6 +1077,67 @@ class Phase1ATest(unittest.TestCase):
         self.assertIn("loss/local_change", metrics)
         self.assertIn("loss/local_roi", metrics)
         self.assertIn("loss/local_delta", metrics)
+
+    def test_structured_context_exposes_split_static_dynamic_target_interfaces(self):
+        torch.manual_seed(0)
+        config = make_model_config(cnn_keys="image", mlp_keys="^$")
+        config.use_structure_decoder = True
+        config.use_local_decoder = True
+        config.phase1a.use_structure_change_targets = True
+        config.phase1a.use_local_change_targets = True
+        config.phase1a.use_direct_delta_targets = True
+        obs_space = DictSpace({"image": BoxSpace((16, 16, 3))})
+        act_space = BoxSpace((3,))
+        agent = Dreamer(config, obs_space, act_space)
+        obs = torch.randint(0, 256, (2, 4, 16, 16, 3), dtype=torch.uint8)
+        batch = make_batch({"image": obs}, sum(act_space.shape))
+        initial_state = agent.get_initial_state(obs.shape[0])
+        structured = self._build_structured(agent, batch, (initial_state["stoch"], initial_state["deter"]))
+
+        self.assertIn("static", structured)
+        self.assertIn("dynamic", structured)
+        self.assertIn("targets", structured)
+        self.assertIn("reach", structured)
+        self.assertIn("current", structured["static"])
+        self.assertIn("nxt", structured["static"])
+        self.assertIn("structure_decoder_out", structured["static"])
+        self.assertIn("target_delta_M", structured["dynamic"])
+        self.assertIn("effect_out", structured["dynamic"])
+        self.assertIn("local_decoder_out", structured["dynamic"])
+        self.assertIn("region_map_target", structured["targets"]["structure"])
+        self.assertIn("slot_mask_target", structured["targets"]["structure"])
+        self.assertIn("delta_map_target", structured["targets"]["effect"])
+        self.assertIn("delta_obj_target", structured["targets"]["effect"])
+        self.assertIn("direct_target", structured["reach"])
+        torch.testing.assert_close(structured["dynamic"]["target_delta_M"], structured["target_delta_M"])
+        torch.testing.assert_close(
+            structured["targets"]["effect"]["delta_map_target"],
+            structured["direct_delta_map_target"],
+        )
+
+    def test_reach_v2_action_conditioned_update_exposes_interface_metrics(self):
+        torch.manual_seed(0)
+        config = make_model_config(cnn_keys="image", mlp_keys="^$")
+        config.phase1a.reach_v2.enabled = True
+        config.phase1a.reach_v2.condition_action = True
+        obs_space = DictSpace({"image": BoxSpace((16, 16, 3))})
+        act_space = BoxSpace((3,))
+        agent = Dreamer(config, obs_space, act_space)
+        obs = torch.randint(0, 256, (2, 4, 16, 16, 3), dtype=torch.uint8)
+        initial_state = agent.get_initial_state(obs.shape[0])
+        replay = FakeReplayBuffer(
+            make_batch({"image": obs}, sum(act_space.shape)),
+            (initial_state["stoch"], initial_state["deter"]),
+        )
+
+        metrics = agent.update(replay)
+
+        self.assertTrue(agent.reachability_head.condition_action)
+        self.assertIn("loss/reach", metrics)
+        self.assertIn("phase1a/reach_v2_enabled", metrics)
+        self.assertIn("phase1a/reach_action_conditioned", metrics)
+        self.assertEqual(float(metrics["phase1a/reach_v2_enabled"].detach()), 1.0)
+        self.assertEqual(float(metrics["phase1a/reach_action_conditioned"].detach()), 1.0)
 
     def test_imagination_mode_mix_can_force_greedy_rollout_actions(self):
         config = make_model_config(cnn_keys="^$", mlp_keys="state")
