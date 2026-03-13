@@ -327,8 +327,10 @@ def make_model_config(
             "rule_prediction_consumer": {
                 "layers": 1,
                 "hidden": 24,
+                "mode": "residual",
                 "residual_scale": 0.03,
                 "detach_rule_inputs": True,
+                "detach_aux_on_consistency": True,
                 "apply_to_map": False,
                 "apply_to_obj": False,
                 "apply_to_global": True,
@@ -930,6 +932,84 @@ class Phase1ATest(unittest.TestCase):
         _, metrics = agent._apply_rule_prediction_consumer(structured, artifact)
         self.assertAlmostEqual(float(metrics["phase2/rule_consumer_latch_progress"].detach()), 1.0, places=6)
         self.assertAlmostEqual(float(metrics["phase2/rule_consumer_effective_scale"].detach()), 1.0, places=6)
+
+    def test_rule_prediction_consumer_aux_mode_keeps_effect_out_fixed(self):
+        config = make_model_config(
+            cnn_keys="^$",
+            mlp_keys="state",
+            use_objectification=True,
+            use_phase2=True,
+            use_rule_prediction_consumer=True,
+        )
+        config.rule_prediction_consumer.mode = "aux"
+        obs_space = DictSpace({"state": BoxSpace((6,))})
+        act_space = DiscreteSpace(3)
+        agent = Dreamer(config, obs_space, act_space)
+
+        with torch.no_grad():
+            agent.rule_prediction_consumer.delta_global.bias.fill_(1.0)
+
+        batch_shape = (2, 4)
+        effect_out = {
+            "delta_map": torch.randn(*batch_shape, agent.structured_readout.map_slots, agent.structured_readout.map_dim),
+            "delta_obj": torch.randn(*batch_shape, agent.structured_readout.obj_slots, agent.structured_readout.obj_dim),
+            "delta_global": torch.randn(*batch_shape, agent.structured_readout.global_dim),
+            "event_logits": torch.randn(*batch_shape, 1),
+        }
+        structured = {
+            "z_eff": torch.randn(*batch_shape, int(config.effect_model.latent_dim)),
+            "effect_out": {key: value.clone() for key, value in effect_out.items()},
+        }
+        artifact = SimpleNamespace(
+            delta_rule_fused=torch.randn(*batch_shape, agent.structured_readout.rule_dim),
+            rho_next_pred=torch.randn(*batch_shape, agent.structured_readout.rule_dim),
+            gate=torch.ones(*batch_shape, 1),
+        )
+
+        updated, metrics = agent._attach_rule_prediction_consumer_aux(structured, artifact)
+
+        torch.testing.assert_close(updated["effect_out"]["delta_map"], effect_out["delta_map"])
+        torch.testing.assert_close(updated["effect_out"]["delta_obj"], effect_out["delta_obj"])
+        torch.testing.assert_close(updated["effect_out"]["delta_global"], effect_out["delta_global"])
+        self.assertIn("rule_prediction_consumer_aux_out", updated)
+        self.assertIn("rule_prediction_consumer_aux_weight", updated)
+        self.assertGreater(float(metrics["phase2/rule_consumer_global_residual_abs"].detach()), 0.0)
+
+    def test_phase2_rule_prediction_consumer_aux_update(self):
+        torch.manual_seed(0)
+        config = make_model_config(
+            cnn_keys="^$",
+            mlp_keys="state",
+            use_objectification=True,
+            use_phase2=True,
+            use_rule_prediction_consumer=True,
+        )
+        config.rule_prediction_consumer.mode = "aux"
+        restored_config = OmegaConf.create(OmegaConf.to_container(config, resolve=True))
+        obs_space = DictSpace({"state": BoxSpace((6,))})
+        act_space = BoxSpace((3,))
+        agent = Dreamer(config, obs_space, act_space)
+        obs = {"state": torch.randn(2, 4, 6)}
+        initial_state = agent.get_initial_state(2)
+        replay = FakeReplayBuffer(
+            make_batch(obs, sum(act_space.shape)),
+            (initial_state["stoch"], initial_state["deter"]),
+        )
+
+        metrics = agent.update(replay)
+        self.assertIn("loss/rule_consumer_global_aux", metrics)
+        self.assertIn("loss/rule_consumer_global_consistency", metrics)
+        self.assertIn("phase1a/rule_consumer_aux_global_abs", metrics)
+        self.assertIn("phase1a/rule_consumer_aux_weight", metrics)
+        self.assertIn("phase1a/rule_consumer_consistency_abs", metrics)
+
+        state_dict = copy.deepcopy(agent.state_dict())
+        restored = Dreamer(restored_config, obs_space, act_space)
+        restored.load_state_dict(state_dict)
+        torch.testing.assert_close(
+            state_dict["rule_prediction_consumer.delta_global.weight"],
+            restored.state_dict()["rule_prediction_consumer.delta_global.weight"],
+        )
 
     def test_structure_spatial_recon_survives_without_direct_change_targets(self):
         torch.manual_seed(0)

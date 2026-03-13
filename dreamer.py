@@ -143,6 +143,10 @@ class Dreamer(nn.Module):
         self.rule_prediction_consumer_detach_rule_inputs = bool(
             getattr(rule_prediction_consumer_cfg, "detach_rule_inputs", True)
         )
+        self.rule_prediction_consumer_mode = str(getattr(rule_prediction_consumer_cfg, "mode", "residual"))
+        self.rule_prediction_consumer_detach_aux_on_consistency = bool(
+            getattr(rule_prediction_consumer_cfg, "detach_aux_on_consistency", True)
+        )
         self.rule_prediction_consumer_apply_to_map = bool(
             getattr(rule_prediction_consumer_cfg, "apply_to_map", False)
         )
@@ -256,6 +260,8 @@ class Dreamer(nn.Module):
             raise ValueError("Binding/signature/rule-update require use_operator_bank=True.")
         if self.use_rule_prediction_consumer and not (self.use_operator_bank and self.use_effect_model):
             raise ValueError("Rule prediction consumer requires use_operator_bank=True and use_effect_model=True.")
+        if self.use_rule_prediction_consumer and self.rule_prediction_consumer_mode not in {"residual", "aux"}:
+            raise ValueError(f"Unknown rule_prediction_consumer.mode: {self.rule_prediction_consumer_mode}")
         if self.use_operator_bank and not (self.use_binding_head and self.use_signature_head and self.use_rule_update):
             raise ValueError("Phase 2 requires operator bank, binding head, signature head, and rule update together.")
 
@@ -381,6 +387,9 @@ class Dreamer(nn.Module):
                     bool(config.norm),
                 )
                 modules.update({"rule_prediction_consumer": self.rule_prediction_consumer})
+                if self.rule_prediction_consumer_mode == "aux":
+                    self._loss_scales.setdefault("rule_consumer_global_aux", 1.0)
+                    self._loss_scales.setdefault("rule_consumer_global_consistency", 1.0)
             self._loss_scales.setdefault("delta_map", 1.0)
             self._loss_scales.setdefault("delta_obj", 1.0)
             self._loss_scales.setdefault("delta_global", 1.0)
@@ -1062,6 +1071,37 @@ class Dreamer(nn.Module):
                 )
                 metrics["phase1a/direct_delta_map_target"] = structured["direct_delta_map_target"].mean()
                 metrics["phase1a/direct_delta_obj_target"] = structured["direct_delta_obj_target"].mean()
+            aux_out = structured.get("rule_prediction_consumer_aux_out")
+            aux_weight = structured.get("rule_prediction_consumer_aux_weight")
+            if aux_out is not None:
+                if aux_weight is None:
+                    aux_weight = torch.ones_like(structured["transition_valid_ratio"])
+                aux_weight_scalar = aux_weight.squeeze(-1) if aux_weight.dim() > structured["transition_valid_ratio"].dim() else aux_weight
+                aux_valid = structured["transition_valid_ratio"] * aux_weight_scalar
+                losses["rule_consumer_global_aux"] = self._weighted_loss(
+                    aux_out["delta_global"],
+                    target_delta_g,
+                    aux_valid,
+                    kind="smooth_l1",
+                )
+                consistency_target = (
+                    aux_out["delta_global"].detach()
+                    if self.rule_prediction_consumer_detach_aux_on_consistency
+                    else aux_out["delta_global"]
+                )
+                losses["rule_consumer_global_consistency"] = self._weighted_loss(
+                    effect_out["delta_global"],
+                    consistency_target,
+                    aux_valid,
+                    kind="smooth_l1",
+                )
+                metrics["phase1a/rule_consumer_aux_global_abs"] = (
+                    aux_out["delta_global"].abs() * aux_weight
+                ).mean()
+                metrics["phase1a/rule_consumer_aux_weight"] = aux_weight.mean()
+                metrics["phase1a/rule_consumer_consistency_abs"] = (
+                    (effect_out["delta_global"] - aux_out["delta_global"].detach()).abs() * aux_weight
+                ).mean()
         if "local_decoder_out" in structured and self.phase1a_use_local_change_targets and direct_spatial_binary is not None:
             local_out = structured["local_decoder_out"]
             local_delta_weight = direct_spatial_weight * (0.25 + direct_spatial_roi)
@@ -1442,7 +1482,7 @@ class Dreamer(nn.Module):
             structured["objectification_out"],
         )
 
-    def _apply_rule_prediction_consumer(self, structured, artifact):
+    def _rule_prediction_consumer_outputs(self, structured, artifact):
         delta_rule_fused = artifact.delta_rule_fused
         rho_next_pred = artifact.rho_next_pred
         if self.rule_prediction_consumer_detach_rule_inputs:
@@ -1498,15 +1538,10 @@ class Dreamer(nn.Module):
             residual["delta_obj"] = torch.zeros_like(residual["delta_obj"])
         if not self.rule_prediction_consumer_apply_to_global:
             residual["delta_global"] = torch.zeros_like(residual["delta_global"])
-        effect_out = dict(structured["effect_out"])
+        effect_out = structured["effect_out"]
         base_delta_map = effect_out["delta_map"]
         base_delta_obj = effect_out["delta_obj"]
         base_delta_global = effect_out["delta_global"]
-        effect_out["delta_map"] = base_delta_map + residual["delta_map"]
-        effect_out["delta_obj"] = base_delta_obj + residual["delta_obj"]
-        effect_out["delta_global"] = base_delta_global + residual["delta_global"]
-        updated = dict(structured)
-        updated["effect_out"] = effect_out
         map_residual_abs = residual["delta_map"].abs().mean()
         obj_residual_abs = residual["delta_obj"].abs().mean()
         global_residual_abs = residual["delta_global"].abs().mean()
@@ -1527,6 +1562,23 @@ class Dreamer(nn.Module):
             "phase2/rule_consumer_global_residual_ratio": global_residual_abs
             / base_delta_global.abs().mean().detach().clamp_min(1e-6),
         }
+        return residual, effective_scale.detach(), metrics
+
+    def _apply_rule_prediction_consumer(self, structured, artifact):
+        residual, _, metrics = self._rule_prediction_consumer_outputs(structured, artifact)
+        effect_out = dict(structured["effect_out"])
+        effect_out["delta_map"] = effect_out["delta_map"] + residual["delta_map"]
+        effect_out["delta_obj"] = effect_out["delta_obj"] + residual["delta_obj"]
+        effect_out["delta_global"] = effect_out["delta_global"] + residual["delta_global"]
+        updated = dict(structured)
+        updated["effect_out"] = effect_out
+        return updated, metrics
+
+    def _attach_rule_prediction_consumer_aux(self, structured, artifact):
+        residual, effective_scale, metrics = self._rule_prediction_consumer_outputs(structured, artifact)
+        updated = dict(structured)
+        updated["rule_prediction_consumer_aux_out"] = residual
+        updated["rule_prediction_consumer_aux_weight"] = effective_scale
         return updated, metrics
 
     def _phase2_rollout_prefix(self, horizon):
@@ -1895,9 +1947,12 @@ class Dreamer(nn.Module):
             if self.use_operator_bank:
                 phase2_art = self._phase2_forward(structured, data)
                 if self.use_rule_prediction_consumer:
-                    structured, consumer_metrics = self._apply_rule_prediction_consumer(structured, phase2_art)
+                    if self.rule_prediction_consumer_mode == "residual":
+                        structured, consumer_metrics = self._apply_rule_prediction_consumer(structured, phase2_art)
+                    else:
+                        structured, consumer_metrics = self._attach_rule_prediction_consumer_aux(structured, phase2_art)
                     metrics.update(consumer_metrics)
-                    if self.use_objectification:
+                    if self.use_objectification and self.rule_prediction_consumer_mode == "residual":
                         structured["objectification_out"] = self._objectification_forward(structured)
                 phase2_losses, phase2_metrics = self._phase2_losses(phase2_art, structured)
                 losses.update(phase2_losses)
