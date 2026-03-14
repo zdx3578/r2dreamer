@@ -35,7 +35,11 @@ TRAIN_STEPS=${TRAIN_STEPS:-20000}
 RUN_NAME=${RUN_NAME:-bench_atari_structured_20k_alien_rule_consumer_aux_pair_seed${SEED}_$(logdir_run_tag)}
 BASE_LOGDIR=${BASE_LOGDIR:-"$ROOT_DIR/logdir/$RUN_NAME"}
 GATE_THRESHOLD=${GATE_THRESHOLD:-0.045}
+START_UPDATES=${START_UPDATES:-625}
+RAMP_UPDATES=${RAMP_UPDATES:-500}
 LATCH_RAMP_UPDATES=${LATCH_RAMP_UPDATES:-250}
+AUX_LOSS_SCALE=${AUX_LOSS_SCALE:-0.02}
+CONSISTENCY_LOSS_SCALE=${CONSISTENCY_LOSS_SCALE:-0.01}
 
 export OMP_NUM_THREADS=${OMP_NUM_THREADS:-4}
 export MKL_NUM_THREADS=${MKL_NUM_THREADS:-4}
@@ -75,11 +79,13 @@ AUX_ARGS=(
   model.rule_prediction_consumer.apply_to_map=False
   model.rule_prediction_consumer.apply_to_obj=False
   model.rule_prediction_consumer.apply_to_global=True
-  model.rule_prediction_consumer.start_updates=625
-  model.rule_prediction_consumer.ramp_updates=500
+  "model.rule_prediction_consumer.start_updates=$START_UPDATES"
+  "model.rule_prediction_consumer.ramp_updates=$RAMP_UPDATES"
   model.rule_prediction_consumer.gate_enable_mode=sticky_threshold
   "model.rule_prediction_consumer.gate_threshold=$GATE_THRESHOLD"
   "model.rule_prediction_consumer.latch_ramp_updates=$LATCH_RAMP_UPDATES"
+  "model.loss_scales.rule_consumer_global_aux=$AUX_LOSS_SCALE"
+  "model.loss_scales.rule_consumer_global_consistency=$CONSISTENCY_LOSS_SCALE"
 )
 
 if [ "$PAIR_PARALLEL" -ge 2 ]; then
