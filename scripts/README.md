@@ -40,6 +40,8 @@ This profile is now the default in:
 
 - `run_phase2_structured_alien_deterministic_debug_ab.sh`
 - `run_phase2_structured_alien_phase1a_followup_ab.sh`
+- `run_phase2_structured_alien_deterministic_main_ab.sh`
+- `run_phase2_structured_alien_phase1a_main_ab.sh`
 
 Why this profile:
 
