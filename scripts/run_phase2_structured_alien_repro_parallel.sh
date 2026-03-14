@@ -3,6 +3,7 @@ set -euo pipefail
 
 ROOT_DIR=$(cd "$(dirname "$0")/.." && pwd)
 source "$ROOT_DIR/scripts/git_run_metadata.sh"
+source "$ROOT_DIR/scripts/git_sync_guard.sh"
 PYTHON_BIN=${PYTHON:-}
 if [ -z "$PYTHON_BIN" ]; then
   if [ -x "$ROOT_DIR/.venv/bin/python" ]; then
@@ -32,6 +33,7 @@ export PYTORCH_CUDA_ALLOC_CONF=${PYTORCH_CUDA_ALLOC_CONF:-expandable_segments:Tr
 mkdir -p "$STRUCTURED_DIR"
 cd "$ROOT_DIR"
 
+git_require_synced_repo "$ROOT_DIR"
 print_git_run_metadata "$ROOT_DIR" "parallel launch"
 
 printf '%s\n' $SEEDS | xargs -P "$MAX_PARALLEL" -I '{}' \

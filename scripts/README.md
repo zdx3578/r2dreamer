@@ -3,6 +3,31 @@
 This directory contains the practical runner stack used for the Phase2
 structured Alien experiments.
 
+## Git Sync Standard
+
+Experiment rollout is git-only. Do not use `scp` to push runner scripts.
+
+Standard flow:
+
+1. Commit local runner or config changes.
+2. Push to `origin/main`.
+3. Run `scripts/pull_experiment_repos.sh`.
+4. Start tmux jobs only after both machines are on the same `HEAD`.
+
+Helper:
+
+- `scripts/pull_experiment_repos.sh`
+  Runs `git pull --ff-only` in this repo locally and on the configured remote
+  hosts. Default remote host list is `2080`. Override with
+  `REMOTE_HOSTS="2080 otherhost"`.
+
+Guardrail:
+
+- `run_phase2_structured_alien_repro_parallel.sh` now refuses to launch if
+  `HEAD != origin/main`.
+- It also refuses to launch from a dirty worktree unless
+  `ALLOW_DIRTY_RUN=1` is explicitly set.
+
 ## Runner Stack
 
 - `run_phase2_structured_alien_repro_one.sh`
