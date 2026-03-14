@@ -718,6 +718,38 @@ class Phase1ATest(unittest.TestCase):
             use_rule_prediction_consumer=True,
         )
 
+    def test_phase2_rule_prediction_consumer_residual_updates_weights(self):
+        torch.manual_seed(0)
+        config = make_model_config(
+            cnn_keys="^$",
+            mlp_keys="state",
+            use_objectification=True,
+            use_phase2=True,
+            use_rule_prediction_consumer=True,
+        )
+        obs_space = DictSpace({"state": BoxSpace((6,))})
+        act_space = BoxSpace((3,))
+        agent = Dreamer(config, obs_space, act_space)
+        obs = {"state": torch.randn(2, 4, 6)}
+        initial_state = agent.get_initial_state(2)
+        replay = FakeReplayBuffer(
+            make_batch(obs, sum(act_space.shape)),
+            (initial_state["stoch"], initial_state["deter"]),
+        )
+
+        initial_weight = agent.state_dict()["rule_prediction_consumer.delta_global.weight"].clone()
+        initial_bias = agent.state_dict()["rule_prediction_consumer.delta_global.bias"].clone()
+        self.assertEqual(float(initial_weight.abs().max()), 0.0)
+        self.assertEqual(float(initial_bias.abs().max()), 0.0)
+
+        metrics = agent.update(replay)
+
+        updated_weight = agent.state_dict()["rule_prediction_consumer.delta_global.weight"]
+        updated_bias = agent.state_dict()["rule_prediction_consumer.delta_global.bias"]
+        self.assertIn("phase2/rule_consumer_global_residual_abs", metrics)
+        self.assertGreater(float(updated_weight.abs().max()), 0.0)
+        self.assertGreater(float(updated_bias.abs().max()), 0.0)
+
     def test_rule_prediction_consumer_global_only_keeps_map_obj_fixed(self):
         config = make_model_config(
             cnn_keys="^$",

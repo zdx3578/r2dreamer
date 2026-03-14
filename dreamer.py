@@ -1708,6 +1708,10 @@ class Dreamer(nn.Module):
         effect_out["delta_obj"] = effect_out["delta_obj"] + residual["delta_obj"]
         effect_out["delta_global"] = effect_out["delta_global"] + residual["delta_global"]
         updated = dict(structured)
+        if "dynamic" in structured:
+            dynamic = dict(structured["dynamic"])
+            dynamic["effect_out"] = effect_out
+            updated["dynamic"] = dynamic
         updated["effect_out"] = effect_out
         return updated, metrics
 
