@@ -11,20 +11,23 @@ set -euo pipefail
 # - Is prioritized replay the main instability amplifier?
 # - If yes, is "off" required, or is the old max/0.6 setup simply too aggressive?
 #
-# Default seeds use three unseen slots so a single 2080 Ti can keep MAX_PARALLEL=3 busy.
+# The canonical default now keeps `MAX_PARALLEL=2` for cross-machine
+# comparability. Raise it explicitly only when a dedicated machine can sustain
+# more concurrency for this replay matrix.
 #
 # Typical usage:
-#   MACHINE_NAME=$(hostname -s) GPU_ID=0 MAX_PARALLEL=3 SEEDS="3 4 5" \
+#   MACHINE_NAME=$(hostname -s) GPU_ID=0 MAX_PARALLEL=2 SEEDS="3 4 5" \
 #   scripts/run_phase2_structured_alien_replay_ab.sh
 #
 # Useful overrides:
 #   SEEDS="3 4"                 -> only run the two historically interesting seeds
-#   MAX_PARALLEL=2              -> if another machine cannot sustain parallel 3
+#   MAX_PARALLEL=3              -> if a dedicated machine can sustain more parallel runs
 #   RUN_NAME=...                -> deterministic logdir naming for cross-machine comparison
 
 ROOT_DIR=$(cd "$(dirname "$0")/.." && pwd)
 source "$ROOT_DIR/scripts/logdir_naming.sh"
 source "$ROOT_DIR/scripts/git_run_metadata.sh"
+source "$ROOT_DIR/scripts/structured_alien_defaults.sh"
 
 PYTHON_BIN=${PYTHON:-}
 if [ -z "$PYTHON_BIN" ]; then
@@ -38,7 +41,7 @@ if [ -z "$PYTHON_BIN" ]; then
 fi
 
 GPU_ID=${GPU_ID:-0}
-MAX_PARALLEL=${MAX_PARALLEL:-3}
+MAX_PARALLEL=${MAX_PARALLEL:-${STRUCTURED_ALIEN_MAX_PARALLEL_DEFAULT}}
 SEEDS=${SEEDS:-"3 4 5"}
 RUN_NAME=${RUN_NAME:-bench_atari_structured_50k_alien_replay_ab_$(logdir_run_tag)}
 BASE_LOGDIR=${BASE_LOGDIR:-"$ROOT_DIR/logdir/$RUN_NAME"}

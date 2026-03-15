@@ -17,6 +17,7 @@ set -euo pipefail
 ROOT_DIR=$(cd "$(dirname "$0")/.." && pwd)
 source "$ROOT_DIR/scripts/logdir_naming.sh"
 source "$ROOT_DIR/scripts/git_run_metadata.sh"
+source "$ROOT_DIR/scripts/structured_alien_defaults.sh"
 
 PYTHON_BIN=${PYTHON:-}
 if [ -z "$PYTHON_BIN" ]; then
@@ -30,7 +31,7 @@ if [ -z "$PYTHON_BIN" ]; then
 fi
 
 GPU_ID=${GPU_ID:-0}
-MAX_PARALLEL=${MAX_PARALLEL:-2}
+MAX_PARALLEL=${MAX_PARALLEL:-${STRUCTURED_ALIEN_MAX_PARALLEL_DEFAULT}}
 SEEDS=${SEEDS:-"1 2"}
 RUN_NAME=${RUN_NAME:-bench_atari_structured_50k_alien_rootcause_ab_$(logdir_run_tag)}
 BASE_LOGDIR=${BASE_LOGDIR:-"$ROOT_DIR/logdir/$RUN_NAME"}

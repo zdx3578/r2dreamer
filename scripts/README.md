@@ -3,6 +3,24 @@
 This directory contains the practical runner stack used for the Phase2
 structured Alien experiments.
 
+## Agent Defaults
+
+For new Codex sessions, the repo-level operational defaults now live in
+`AGENTS.md` at the repository root.
+
+Use that file for concise, durable rules such as:
+
+- which SSH host aliases are canonical for experiments
+- whether remote sync is git-only
+- the current canonical run profile that new sessions should assume
+
+Keep script-specific details and tuning rationale in this `README`, not in
+`AGENTS.md`.
+
+The machine-executed defaults for the current structured Alien rerun track now
+live in `scripts/structured_alien_defaults.sh`. Update that file when the
+canonical runtime profile changes.
+
 ## Git Sync Standard
 
 Experiment rollout is git-only. Do not use `scp` to push runner scripts.
@@ -37,44 +55,47 @@ Guardrail:
 - `run_phase2_structured_alien_*_ab.sh`
   Thin experiment-matrix wrappers built on top of the shared launcher.
 
-## Baseline Throughput
+## Shared Runtime Defaults
 
-The base structured Alien runner still carries the original conservative
-per-run defaults from `run_phase2_structured_alien_repro_one.sh`:
-
-- `batch_size=4`
-- `batch_length=32`
-- `env.env_num=1`
-- `env.train_ratio=32`
-
-Those values were chosen for safe 20k/50k reproduction, not for saturating
-modern GPUs.
-
-## Current Throughput Profile
-
-For the current follow-up runs we use this higher-throughput profile in the
-wrapper scripts:
+The base structured Alien runner now sources
+`scripts/structured_alien_defaults.sh`, so the machine-executed defaults are:
 
 - `MAX_PARALLEL=2`
-- `batch_size=8`
+- `batch_size=16`
 - `batch_length=64`
-- `env.env_num=2`
-- `env.train_ratio=32`
+- `env.env_num=4`
+- `env.train_ratio=128`
 
-This profile is now the default in:
+The older conservative profile
+`batch_size=4 / batch_length=32 / env.env_num=1 / env.train_ratio=32`
+is now only a historical reference.
 
-- `run_phase2_structured_alien_deterministic_debug_ab.sh`
-- `run_phase2_structured_alien_phase1a_followup_ab.sh`
-- `run_phase2_structured_alien_deterministic_main_ab.sh`
-- `run_phase2_structured_alien_phase1a_main_ab.sh`
+## Current Comparability Profile
 
-Why this profile:
+For the current structured Alien rerun track, the canonical comparability
+profile is:
 
-- It raises the GPU-side batch/workload size.
-- It raises environment-side data production with `env.env_num=2`.
-- It does not change the update/data ratio, so it is less likely to distort
-  wall-clock speed or training behavior than jumping straight to
-  `env.train_ratio=128`.
+- `MAX_PARALLEL=2`
+- `batch_size=16`
+- `batch_length=64`
+- `env.env_num=4`
+- `env.train_ratio=128`
+
+This is the profile to use when continuing the recent routing and weak2
+experiments and you want new runs to stay directly comparable with that line.
+
+Important:
+
+- This is an experiment-profile default, not a universal tuning rule.
+- Some legacy wrappers still carry lighter defaults or different knob choices.
+- When those wrappers are reused for the current rerun track, override them
+  explicitly or update the wrapper before launching.
+
+Why this distinction matters:
+
+- The comparability profile preserves continuity with the latest reruns.
+- The generic tuning guidance below is still useful when designing a new run
+  profile from scratch.
 
 ## Tuning Guidance
 
@@ -109,12 +130,13 @@ in this order:
 5. `env.train_ratio`: keep at `32` unless you explicitly want more optimizer
    work per environment step
 
-## Why Not Jump Straight To train_ratio=128
+## About train_ratio=128
 
-`env.train_ratio=128` can increase GPU work, but it also increases the number
-of optimizer updates per environment step. That often improves utilization at
-the cost of wall-clock speed, so it is not the first knob for "finish the
-experiment faster".
+`env.train_ratio=128` increases optimizer work per environment step. That can
+be the right choice for a specific comparison track, but it is still not the
+first generic knob for "make any run faster".
 
-Use `train_ratio=128` only as a deliberate experiment choice, not as the
-default throughput fix.
+Use it deliberately:
+
+- use `train_ratio=128` when the current experiment line already depends on it
+- do not switch to it silently when you are doing fresh throughput tuning

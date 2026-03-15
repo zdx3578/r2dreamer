@@ -15,6 +15,7 @@ set -euo pipefail
 ROOT_DIR=$(cd "$(dirname "$0")/.." && pwd)
 source "$ROOT_DIR/scripts/logdir_naming.sh"
 source "$ROOT_DIR/scripts/git_run_metadata.sh"
+source "$ROOT_DIR/scripts/structured_alien_defaults.sh"
 
 PYTHON_BIN=${PYTHON:-}
 if [ -z "$PYTHON_BIN" ]; then
@@ -28,16 +29,16 @@ if [ -z "$PYTHON_BIN" ]; then
 fi
 
 GPU_ID=${GPU_ID:-0}
-MAX_PARALLEL=${MAX_PARALLEL:-2}
+MAX_PARALLEL=${MAX_PARALLEL:-${STRUCTURED_ALIEN_MAX_PARALLEL_DEFAULT}}
 SEEDS=${SEEDS:-"3 4 5"}
 ENV_STEPS=${ENV_STEPS:-200000}
 RUN_NAME=${RUN_NAME:-bench_atari_structured_200k_alien_phase1a_main_ab_$(logdir_run_tag)}
 BASE_LOGDIR=${BASE_LOGDIR:-"$ROOT_DIR/logdir/$RUN_NAME"}
 MACHINE_NAME=${MACHINE_NAME:-$(hostname -s 2>/dev/null || hostname)}
-BATCH_SIZE=${BATCH_SIZE:-8}
-BATCH_LENGTH=${BATCH_LENGTH:-64}
-ENV_NUM=${ENV_NUM:-2}
-TRAIN_RATIO=${TRAIN_RATIO:-32}
+BATCH_SIZE=${BATCH_SIZE:-${STRUCTURED_ALIEN_BATCH_SIZE_DEFAULT}}
+BATCH_LENGTH=${BATCH_LENGTH:-${STRUCTURED_ALIEN_BATCH_LENGTH_DEFAULT}}
+ENV_NUM=${ENV_NUM:-${STRUCTURED_ALIEN_ENV_NUM_DEFAULT}}
+TRAIN_RATIO=${TRAIN_RATIO:-${STRUCTURED_ALIEN_TRAIN_RATIO_DEFAULT}}
 
 COMMON_ARGS=(
   env.steps="$ENV_STEPS"

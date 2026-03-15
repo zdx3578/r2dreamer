@@ -14,16 +14,17 @@ set -euo pipefail
 # - Is it mostly coming from alpha being too aggressive?
 # - Or does the cleanest result still come from replay off?
 #
-# The default seeds are {3,4,5} to reuse the current adversarial seed set while
-# saturating MAX_PARALLEL=3 on a single 2080 Ti.
+# The default seeds are {3,4,5} to reuse the current adversarial seed set
+# under the shared `MAX_PARALLEL=2` comparability profile.
 #
 # Typical usage:
-#   MACHINE_NAME=$(hostname -s) GPU_ID=0 MAX_PARALLEL=3 SEEDS="3 4 5" \
+#   MACHINE_NAME=$(hostname -s) GPU_ID=0 MAX_PARALLEL=2 SEEDS="3 4 5" \
 #   scripts/run_phase2_structured_alien_replay_knobs_ab.sh
 
 ROOT_DIR=$(cd "$(dirname "$0")/.." && pwd)
 source "$ROOT_DIR/scripts/logdir_naming.sh"
 source "$ROOT_DIR/scripts/git_run_metadata.sh"
+source "$ROOT_DIR/scripts/structured_alien_defaults.sh"
 
 PYTHON_BIN=${PYTHON:-}
 if [ -z "$PYTHON_BIN" ]; then
@@ -37,7 +38,7 @@ if [ -z "$PYTHON_BIN" ]; then
 fi
 
 GPU_ID=${GPU_ID:-0}
-MAX_PARALLEL=${MAX_PARALLEL:-3}
+MAX_PARALLEL=${MAX_PARALLEL:-${STRUCTURED_ALIEN_MAX_PARALLEL_DEFAULT}}
 SEEDS=${SEEDS:-"3 4 5"}
 RUN_NAME=${RUN_NAME:-bench_atari_structured_50k_alien_replay_knobs_ab_$(logdir_run_tag)}
 BASE_LOGDIR=${BASE_LOGDIR:-"$ROOT_DIR/logdir/$RUN_NAME"}

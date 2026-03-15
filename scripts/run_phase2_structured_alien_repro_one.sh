@@ -3,6 +3,7 @@ set -euo pipefail
 
 ROOT_DIR=$(cd "$(dirname "$0")/.." && pwd)
 source "$ROOT_DIR/scripts/git_run_metadata.sh"
+source "$ROOT_DIR/scripts/structured_alien_defaults.sh"
 PYTHON_BIN=${PYTHON:-}
 if [ -z "$PYTHON_BIN" ]; then
   if [ -x "$ROOT_DIR/.venv/bin/python" ]; then
@@ -20,6 +21,10 @@ STRUCTURED_DIR="$BASE_LOGDIR/structured"
 SEED_DIR="$STRUCTURED_DIR/seed_${SEED}"
 TRAIN_EXTRA_ARGS=${TRAIN_EXTRA_ARGS:-}
 PROBE_EXTRA_ARGS=${PROBE_EXTRA_ARGS:-}
+BATCH_SIZE=${BATCH_SIZE:-${STRUCTURED_ALIEN_BATCH_SIZE_DEFAULT}}
+BATCH_LENGTH=${BATCH_LENGTH:-${STRUCTURED_ALIEN_BATCH_LENGTH_DEFAULT}}
+ENV_NUM=${ENV_NUM:-${STRUCTURED_ALIEN_ENV_NUM_DEFAULT}}
+TRAIN_RATIO=${TRAIN_RATIO:-${STRUCTURED_ALIEN_TRAIN_RATIO_DEFAULT}}
 
 mkdir -p "$SEED_DIR"
 cd "$ROOT_DIR"
@@ -43,12 +48,12 @@ train_cmd=(
   device=cuda:0
   buffer.device=cuda:0
   buffer.storage_device=cpu
-  batch_size=4
-  batch_length=32
-  env.env_num=1
+  batch_size="$BATCH_SIZE"
+  batch_length="$BATCH_LENGTH"
+  env.env_num="$ENV_NUM"
   env.eval_episode_num=20
   env.steps=50000
-  env.train_ratio=32
+  env.train_ratio="$TRAIN_RATIO"
   env.task=atari_alien
   trainer.eval_episode_num=20
   trainer.sample_eval_episode_num=5
@@ -61,12 +66,14 @@ train_cmd=(
   trainer.update_log_every=1000
   model.compile=False
 )
+
 if [ "${#train_extra[@]}" -gt 0 ]; then
   train_cmd+=("${train_extra[@]}")
 fi
 
 {
   print_git_run_metadata "$ROOT_DIR" "seed ${SEED} launch"
+  echo "[$(date '+%F %T')] seed ${SEED}: defaults batch_size=$BATCH_SIZE batch_length=$BATCH_LENGTH env.env_num=$ENV_NUM env.train_ratio=$TRAIN_RATIO"
   echo "[$(date '+%F %T')] seed ${SEED}: train start"
   "${train_cmd[@]}"
 } |& tee "$SEED_DIR/run.out"

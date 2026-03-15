@@ -4,6 +4,7 @@ set -euo pipefail
 ROOT_DIR=$(cd "$(dirname "$0")/.." && pwd)
 source "$ROOT_DIR/scripts/git_run_metadata.sh"
 source "$ROOT_DIR/scripts/git_sync_guard.sh"
+source "$ROOT_DIR/scripts/structured_alien_defaults.sh"
 PYTHON_BIN=${PYTHON:-}
 if [ -z "$PYTHON_BIN" ]; then
   if [ -x "$ROOT_DIR/.venv/bin/python" ]; then
@@ -16,13 +17,17 @@ if [ -z "$PYTHON_BIN" ]; then
 fi
 
 GPU_ID=${GPU_ID:-0}
-MAX_PARALLEL=${MAX_PARALLEL:-2}
+MAX_PARALLEL=${MAX_PARALLEL:-${STRUCTURED_ALIEN_MAX_PARALLEL_DEFAULT}}
 SEEDS=${SEEDS:-"0 1 4 5"}
 RUN_NAME=${RUN_NAME:-bench_atari_structured_50k_alien_repro_$(date +%Y%m%d_%H%M%S)}
 BASE_LOGDIR=${BASE_LOGDIR:-"$ROOT_DIR/logdir/$RUN_NAME"}
 STRUCTURED_DIR="$BASE_LOGDIR/structured"
 TRAIN_EXTRA_ARGS=${TRAIN_EXTRA_ARGS:-}
 PROBE_EXTRA_ARGS=${PROBE_EXTRA_ARGS:-}
+BATCH_SIZE=${BATCH_SIZE:-${STRUCTURED_ALIEN_BATCH_SIZE_DEFAULT}}
+BATCH_LENGTH=${BATCH_LENGTH:-${STRUCTURED_ALIEN_BATCH_LENGTH_DEFAULT}}
+ENV_NUM=${ENV_NUM:-${STRUCTURED_ALIEN_ENV_NUM_DEFAULT}}
+TRAIN_RATIO=${TRAIN_RATIO:-${STRUCTURED_ALIEN_TRAIN_RATIO_DEFAULT}}
 
 # Keep per-process CPU thread fan-out under control when multiple runs share one GPU.
 export OMP_NUM_THREADS=${OMP_NUM_THREADS:-4}
@@ -41,6 +46,10 @@ printf '%s\n' $SEEDS | xargs -P "$MAX_PARALLEL" -I '{}' \
     PYTHON="$PYTHON_BIN" \
     BASE_LOGDIR="$BASE_LOGDIR" \
     SEED='{}' \
+    BATCH_SIZE="$BATCH_SIZE" \
+    BATCH_LENGTH="$BATCH_LENGTH" \
+    ENV_NUM="$ENV_NUM" \
+    TRAIN_RATIO="$TRAIN_RATIO" \
     TRAIN_EXTRA_ARGS="$TRAIN_EXTRA_ARGS" \
     PROBE_EXTRA_ARGS="$PROBE_EXTRA_ARGS" \
     PYTHONUNBUFFERED=${PYTHONUNBUFFERED:-1} \
