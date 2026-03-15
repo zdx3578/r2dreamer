@@ -76,12 +76,14 @@ class Dreamer(nn.Module):
 
         config.actor.shape = (act_space.n,) if hasattr(act_space, "n") else tuple(map(int, act_space.shape))
         self.act_discrete = False
+        self.actor_unimix_ratio = 0.0
         if hasattr(act_space, "multi_discrete"):
             config.actor.dist = config.actor.dist.multi_disc
             self.act_discrete = True
         elif hasattr(act_space, "discrete"):
             config.actor.dist = config.actor.dist.disc
             self.act_discrete = True
+            self.actor_unimix_ratio = float(getattr(config.actor.dist, "unimix_ratio", 0.0))
         else:
             config.actor.dist = config.actor.dist.cont
 
@@ -230,6 +232,16 @@ class Dreamer(nn.Module):
         )
         self.phase2_four_step_disable_seven_step_error = float(
             getattr(phase2_cfg, "four_step_curriculum_disable_seven_step_error", 0.28)
+        )
+        phase2_control_cfg = getattr(phase2_cfg, "control", {})
+        self.phase2_control_enabled = bool(getattr(phase2_control_cfg, "enabled", False))
+        self.phase2_control_strength = float(getattr(phase2_control_cfg, "strength", 1.0))
+        self.phase2_control_topk = max(0, int(getattr(phase2_control_cfg, "topk", 4)))
+        self.phase2_control_start_updates = max(
+            0, int(getattr(phase2_control_cfg, "start_updates", self.phase2_warmup_updates))
+        )
+        self.phase2_control_ramp_updates = max(
+            1, int(getattr(phase2_control_cfg, "ramp_updates", max(1, self.phase2_warmup_updates)))
         )
         self._phase2_four_step_curriculum_enabled = not self.phase2_four_step_curriculum
         self._phase2_four_step_curriculum_ready_streak = 0
@@ -838,6 +850,125 @@ class Dreamer(nn.Module):
         self.clone_and_freeze()
         return self
 
+    def _phase2_control_scale(self):
+        if not self.phase2_control_enabled:
+            return 0.0
+        updates = self._model_updates + 1
+        if updates <= self.phase2_control_start_updates:
+            return 0.0
+        ramp_updates = updates - self.phase2_control_start_updates
+        progress = min(1.0, float(ramp_updates) / float(self.phase2_control_ramp_updates))
+        return float(self.phase2_control_strength) * progress
+
+    @torch.no_grad()
+    def _phase2_control_ready(self, action_dist):
+        if not self.phase2_control_enabled:
+            return False
+        if not (self.use_structured_readout and self.use_effect_model and self.use_operator_bank):
+            return False
+        if not self.act_discrete:
+            return False
+        if self.phase2_control_topk < 2:
+            return False
+        if self._phase2_control_scale() <= 0.0:
+            return False
+        return isinstance(action_dist, dists.OneHotDist)
+
+    @torch.no_grad()
+    def _phase2_control_current(self, feat):
+        readouts = self.structured_readout(feat)
+        return {
+            "M_t": readouts["M_t"],
+            "O_t": readouts["O_t"],
+            "g_t": readouts["g_t"],
+            "rho_t": readouts["rho_t"],
+        }
+
+    @torch.no_grad()
+    def _phase2_control_gate_proxy(self, effect_out):
+        event_score = torch.sigmoid(effect_out["event_logits"])
+        delta_global_mag = torch.tanh(effect_out["delta_global"].abs().mean(dim=-1, keepdim=True))
+        return {
+            "objectness_score": torch.clamp(0.5 * event_score + 0.5 * delta_global_mag, 0.0, 1.0),
+        }
+
+    @torch.no_grad()
+    def _phase2_control_score(self, artifact, effect_out):
+        gate = artifact.gate.squeeze(-1)
+        head_conf = artifact.operator_conf.squeeze(-1) * artifact.binding_conf.squeeze(-1)
+        memory_conf = artifact.memory_conf.squeeze(-1)
+        event_score = torch.sigmoid(effect_out["event_logits"]).squeeze(-1)
+        impact_score = artifact.impact.abs().squeeze(-1)
+        delta_global_score = torch.tanh(effect_out["delta_global"].abs().mean(dim=-1))
+        return gate * (
+            head_conf
+            + 0.5 * memory_conf
+            + 0.25 * event_score
+            + 0.25 * impact_score
+            + 0.25 * delta_global_score
+        )
+
+    @torch.no_grad()
+    def _phase2_control_logits(self, feat, action_logits):
+        batch_size, act_dim = action_logits.shape
+        topk = min(self.phase2_control_topk, act_dim)
+        if topk < 2:
+            zeros = torch.zeros_like(action_logits)
+            return zeros, {
+                "actor_phase2_control_scale": zeros.new_zeros(batch_size),
+                "actor_phase2_control_override": torch.zeros(batch_size, device=zeros.device, dtype=torch.bool),
+                "actor_phase2_control_gate": zeros.new_zeros(batch_size),
+                "actor_phase2_control_score": zeros.new_zeros(batch_size),
+            }
+
+        candidate_idx = torch.topk(action_logits, k=topk, dim=-1).indices
+        candidate_action = F.one_hot(candidate_idx, num_classes=act_dim).to(feat.dtype)
+        current = self._phase2_control_current(feat)
+
+        feat_expand = feat.unsqueeze(1).expand(-1, topk, -1)
+
+        def _expand(value):
+            return value.unsqueeze(1).expand(-1, topk, *value.shape[1:])
+
+        current_expand = {key: _expand(value) for key, value in current.items()}
+        z_eff = self.effect_model(feat_expand, candidate_action, current_expand["rho_t"])
+        effect_out = self.effect_heads(z_eff)
+        gate_proxy = self._phase2_control_gate_proxy(effect_out)
+        artifact = self._phase2_step_forward(
+            feat_expand,
+            candidate_action,
+            current_expand,
+            z_eff,
+            gate_proxy,
+        )
+        score = self._phase2_control_score(artifact, effect_out)
+        centered = score - score.mean(dim=-1, keepdim=True)
+        scale = centered.std(dim=-1, keepdim=True, unbiased=False).clamp_min(1e-6)
+        score_norm = centered / scale
+        control_scale = self._phase2_control_scale()
+        topk_bias = control_scale * score_norm
+
+        bias = torch.zeros_like(action_logits)
+        bias.scatter_add_(-1, candidate_idx, topk_bias)
+
+        base_choice = torch.argmax(action_logits, dim=-1)
+        guided_choice = torch.argmax(action_logits + bias, dim=-1)
+        info = {
+            "actor_phase2_control_scale": bias.new_full((batch_size,), float(control_scale)),
+            "actor_phase2_control_override": guided_choice != base_choice,
+            "actor_phase2_control_gate": artifact.gate.squeeze(-1).max(dim=-1).values,
+            "actor_phase2_control_score": score.max(dim=-1).values,
+        }
+        return bias, info
+
+    @torch.no_grad()
+    def _apply_phase2_control_to_action_dist(self, action_dist, feat):
+        if not self._phase2_control_ready(action_dist):
+            return action_dist, {}
+        bias, info = self._phase2_control_logits(feat, action_dist.logits)
+        guided_logits = action_dist.logits + bias
+        return dists.OneHotDist(guided_logits, unimix_ratio=self.actor_unimix_ratio), info
+
     @torch.no_grad()
     def act(self, obs, state, eval=False, eval_policy="calibrated_mode", return_info=False):
         """Policy inference step."""
@@ -864,6 +995,7 @@ class Dreamer(nn.Module):
         # (B, F)
         feat = self._frozen_rssm.get_feat(stoch, deter)
         action_dist = self._frozen_actor(feat)
+        action_dist, control_info = self._apply_phase2_control_to_action_dist(action_dist, feat)
         # (B, A)
         if eval:
             action = self._select_eval_action(
@@ -881,13 +1013,15 @@ class Dreamer(nn.Module):
         )
         if not return_info:
             return action, next_state
-        return action, next_state, self._action_eval_info(
+        info = self._action_eval_info(
             action_dist,
             action,
             prev_action_for_repeat,
             repeat_count,
             is_first,
         )
+        info.update(control_info)
+        return action, next_state, info
 
     @torch.no_grad()
     def get_initial_state(self, B):
@@ -2516,6 +2650,7 @@ class Dreamer(nn.Module):
             feat = self._frozen_rssm.get_feat(stoch, deter)
             # (B, A)
             policy = self._frozen_actor(feat)
+            policy, _ = self._apply_phase2_control_to_action_dist(policy, feat)
             sample_action = policy.rsample()
             action = sample_action
             if mode_mix_ratio > 0.0 and self.act_discrete:

@@ -171,6 +171,16 @@ class OnlineTrainer:
                     diagnostics["actor_repeat_streak_max"],
                     (act_info["actor_repeat_streak"].to(torch.float32) * repeat_valid).max(),
                 )
+            for key, value in act_info.items():
+                if not key.startswith("actor_phase2_"):
+                    continue
+                sum_key = f"{key}_sum"
+                count_key = f"{key}_count"
+                if sum_key not in diagnostics:
+                    diagnostics[sum_key] = torch.tensor(0.0, dtype=torch.float32, device=agent.device)
+                    diagnostics[count_key] = torch.tensor(0.0, dtype=torch.float32, device=agent.device)
+                diagnostics[sum_key] += (value.to(torch.float32) * active).sum()
+                diagnostics[count_key] += active.sum()
             once_done |= done
         result_diagnostics = {}
         if diagnostics["actor_step_count"] > 0:
@@ -181,6 +191,13 @@ class OnlineTrainer:
         if diagnostics["actor_repeat_count"] > 0:
             result_diagnostics["actor_mode_repeat_rate"] = diagnostics["actor_mode_repeat_sum"] / diagnostics["actor_repeat_count"]
             result_diagnostics["actor_repeat_streak_max"] = diagnostics["actor_repeat_streak_max"]
+        for key, value in diagnostics.items():
+            if not key.startswith("actor_phase2_") or not key.endswith("_sum"):
+                continue
+            base_key = key[:-4]
+            count = diagnostics.get(f"{base_key}_count")
+            if count is not None and float(count.item()) > 0.0:
+                result_diagnostics[base_key] = value / count
         # dict of (B, T, *)
         return {
             "score": returns.mean(),

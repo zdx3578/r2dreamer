@@ -128,6 +128,12 @@ phase2:
   match_gate_mode: soft
   match_gate_floor: 0.25
   warmup_updates: 1000
+  control:
+    enabled: True
+    strength: 1.0
+    topk: 4
+    start_updates: 1000
+    ramp_updates: 1000
   memory_write_operator_threshold: 0.14
   memory_write_binding_threshold: 0.30
   memory_write_alignment_threshold: 0.60

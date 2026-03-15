@@ -198,6 +198,14 @@ def make_model_config(
                 "match_margin_threshold": 0.02,
                 "match_gate_mode": "soft",
                 "match_gate_floor": 0.25,
+                "warmup_updates": 0,
+                "control": {
+                    "enabled": True,
+                    "strength": 1.0,
+                    "topk": 3,
+                    "start_updates": 1000,
+                    "ramp_updates": 1,
+                },
                 "memory_write_operator_threshold": 0.14,
                 "memory_write_binding_threshold": 0.30,
                 "memory_write_alignment_threshold": 0.60,
@@ -306,6 +314,11 @@ def make_model_config(
             "actor_training": {
                 "mode_gap_weight": 0.0,
                 "mode_gap_margin": 0.0,
+            },
+            "actor_imagination": {
+                "mode_mix": 0.0,
+                "mode_mix_start_updates": 0,
+                "mode_mix_ramp_updates": 1,
             },
             "critic": {
                 "shape": [255],
@@ -766,6 +779,73 @@ class Phase1ATest(unittest.TestCase):
         self.assertEqual(int(next_state["eval_repeat_count"][0]), 3)
         self.assertAlmostEqual(float(info["actor_top1_prob"][0]), 0.453303, places=5)
         self.assertAlmostEqual(float(info["actor_top1_top2_margin"][0]), 0.043137, places=5)
+
+    def test_phase2_control_reorders_eval_action_logits(self):
+        config = make_model_config(cnn_keys="^$", mlp_keys="state", use_objectification=True, use_phase2=True)
+        config.phase2.control.start_updates = 0
+        config.phase2.control.ramp_updates = 1
+        obs_space = DictSpace({"state": BoxSpace((6,))})
+        act_space = DiscreteSpace(3)
+        agent = Dreamer(config, obs_space, act_space)
+        agent._frozen_encoder = FakeFrozenEncoder(agent.embed_size)
+        agent._frozen_rssm = FakeFrozenRSSM(agent.rssm.feat_size)
+        agent._frozen_actor = FakeFrozenActor([1.2, 0.8, 0.0])
+
+        def fake_phase2_control_logits(feat, logits):
+            bias = logits.new_tensor([[-2.0, 2.0, 0.0]]).expand(feat.shape[0], -1)
+            info = {
+                "actor_phase2_control_scale": logits.new_ones(feat.shape[0]),
+                "actor_phase2_control_override": torch.ones(feat.shape[0], dtype=torch.bool, device=logits.device),
+                "actor_phase2_control_gate": logits.new_ones(feat.shape[0]),
+                "actor_phase2_control_score": logits.new_ones(feat.shape[0]),
+            }
+            return bias, info
+
+        agent._phase2_control_logits = fake_phase2_control_logits
+
+        obs = {
+            "state": torch.zeros(1, 6, dtype=torch.float32),
+            "is_first": torch.zeros(1, dtype=torch.bool),
+        }
+        state = agent.get_initial_state(1)
+
+        action, _, info = agent.act(obs, state, eval=True, eval_policy="raw_mode", return_info=True)
+
+        torch.testing.assert_close(action[0], torch.tensor([0.0, 1.0, 0.0]))
+        self.assertEqual(float(info["actor_phase2_control_scale"][0]), 1.0)
+        self.assertEqual(float(info["actor_phase2_control_gate"][0]), 1.0)
+        self.assertEqual(float(info["actor_phase2_control_score"][0]), 1.0)
+        self.assertEqual(bool(info["actor_phase2_control_override"][0]), True)
+
+    def test_phase2_control_biases_imagination_actions(self):
+        config = make_model_config(cnn_keys="^$", mlp_keys="state", use_objectification=True, use_phase2=True)
+        config.phase2.control.start_updates = 0
+        config.phase2.control.ramp_updates = 1
+        config.actor_imagination.mode_mix = 1.0
+        config.actor_imagination.mode_mix_start_updates = 0
+        config.actor_imagination.mode_mix_ramp_updates = 1
+        obs_space = DictSpace({"state": BoxSpace((6,))})
+        act_space = DiscreteSpace(3)
+        agent = Dreamer(config, obs_space, act_space)
+        agent._frozen_rssm = FakeFrozenRSSM(agent.rssm.feat_size)
+        agent._frozen_actor = FakeFrozenActor([1.3, 0.9, 0.0])
+
+        def fake_phase2_control_logits(feat, logits):
+            bias = logits.new_tensor([[-2.5, 2.5, 0.0]]).expand(feat.shape[0], -1)
+            info = {
+                "actor_phase2_control_scale": logits.new_ones(feat.shape[0]),
+                "actor_phase2_control_override": torch.ones(feat.shape[0], dtype=torch.bool, device=logits.device),
+                "actor_phase2_control_gate": logits.new_ones(feat.shape[0]),
+                "actor_phase2_control_score": logits.new_ones(feat.shape[0]),
+            }
+            return bias, info
+
+        agent._phase2_control_logits = fake_phase2_control_logits
+        state = agent.get_initial_state(2)
+
+        _, imag_action = agent._imagine((state["stoch"], state["deter"]), imag_horizon=2)
+
+        torch.testing.assert_close(imag_action[0, 0], torch.tensor([0.0, 1.0, 0.0]))
 
     def test_phase2_soft_match_gate_uses_slot_match_margin_score(self):
         config = make_model_config(cnn_keys="^$", mlp_keys="state")
