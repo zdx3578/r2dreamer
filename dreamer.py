@@ -252,8 +252,11 @@ class Dreamer(nn.Module):
             "obj_local": float(getattr(objectification_cfg, "obj_local_early", self._loss_scales.get("obj_local", 1.0))),
             "obj_rel": float(getattr(objectification_cfg, "obj_rel_early", self._loss_scales.get("obj_rel", 1.0))),
         }
+        loss_routing_cfg = getattr(config, "loss_routing", {})
+        self.loss_routing_enabled = bool(getattr(loss_routing_cfg, "enabled", True))
         self._model_updates = 0
         self.phase1a_direct_change_target_builder = None
+        self._decoder_loss_names = tuple()
 
         if self.use_effect_model and not self.use_structured_readout:
             raise ValueError("Effect model requires use_structured_readout=True.")
@@ -303,6 +306,7 @@ class Dreamer(nn.Module):
             )
             recon = self._loss_scales.pop("recon")
             self._loss_scales.update({k: recon for k in self.decoder.all_keys})
+            self._decoder_loss_names = tuple(self.decoder.all_keys)
             modules.update({"decoder": self.decoder})
         elif self.rep_loss == "r2dreamer" or self.rep_loss == "infonce":
             # add projector for latent to embedding
@@ -547,13 +551,25 @@ class Dreamer(nn.Module):
                 print(f"{module.numel():>14,}: {key}")
             else:
                 print(f"{sum(p.numel() for p in module.parameters()):>14,}: {key}")
+        self._module_param_names = OrderedDict()
         self._named_params = OrderedDict()
         for name, module in modules.items():
+            module_param_names = []
             if isinstance(module, nn.Parameter):
                 self._named_params[name] = module
+                if module.requires_grad:
+                    module_param_names.append(name)
             else:
                 for param_name, param in module.named_parameters():
-                    self._named_params[f"{name}.{param_name}"] = param
+                    full_name = f"{name}.{param_name}"
+                    self._named_params[full_name] = param
+                    if param.requires_grad:
+                        module_param_names.append(full_name)
+            self._module_param_names[name] = tuple(module_param_names)
+        self._trainable_named_params = OrderedDict(
+            (name, param) for name, param in self._named_params.items() if param.requires_grad
+        )
+        self._loss_routing_param_groups = self._build_loss_routing_param_groups()
         print(f"Optimizer has: {sum(p.numel() for p in self._named_params.values())} parameters.")
 
         def _agc(params):
@@ -657,6 +673,164 @@ class Dreamer(nn.Module):
             assert name_orig == name_new
             param_new.data = param_orig.data
             param_new.requires_grad_(False)
+
+    def _union_param_names(self, *collections):
+        ordered = OrderedDict()
+        for collection in collections:
+            for param_name in collection:
+                ordered.setdefault(param_name, None)
+        return tuple(ordered)
+
+    def _build_loss_routing_param_groups(self):
+        groups = OrderedDict()
+        groups["all_trainable"] = tuple(self._trainable_named_params.keys())
+        groups["core"] = self._union_param_names(
+            self._module_param_names.get("encoder", ()),
+            self._module_param_names.get("rssm", ()),
+        )
+        groups["actor"] = self._module_param_names.get("actor", ())
+        groups["value"] = self._module_param_names.get("value", ())
+        groups["reward_head"] = self._module_param_names.get("reward", ())
+        groups["cont_head"] = self._module_param_names.get("cont", ())
+        groups["decoder"] = self._module_param_names.get("decoder", ())
+        groups["projector"] = self._module_param_names.get("projector", ())
+        groups["dreamerpro"] = self._union_param_names(
+            self._module_param_names.get("prototypes", ()),
+            self._module_param_names.get("obs_proj", ()),
+            self._module_param_names.get("feat_proj", ()),
+        )
+        groups["structured_effect"] = self._union_param_names(
+            self._module_param_names.get("structured_readout", ()),
+            self._module_param_names.get("structure_decoder", ()),
+            self._module_param_names.get("effect_model", ()),
+            self._module_param_names.get("effect_heads", ()),
+            self._module_param_names.get("local_effect_decoder", ()),
+            self._module_param_names.get("reachability_head", ()),
+            self._module_param_names.get("goal_progress_head", ()),
+            self._module_param_names.get("objectification", ()),
+        )
+        groups["consumer"] = self._module_param_names.get("rule_prediction_consumer", ())
+        groups["phase2_operator"] = self._module_param_names.get("operator_bank", ())
+        groups["phase2_binding"] = self._module_param_names.get("binding_head", ())
+        groups["phase2_signature"] = self._module_param_names.get("signature_head", ())
+        groups["phase2_rule_update"] = self._module_param_names.get("rule_update_head", ())
+        groups["phase2_memory"] = self._module_param_names.get("rule_memory", ())
+        groups["phase2_rule"] = self._union_param_names(
+            groups["phase2_operator"],
+            groups["phase2_binding"],
+            groups["phase2_signature"],
+            groups["phase2_rule_update"],
+            groups["phase2_memory"],
+            self._module_param_names.get("rule_apply", ()),
+        )
+        groups["effect_global"] = tuple(
+            name
+            for name in self._trainable_named_params
+            if name.startswith("effect_model.")
+            or name.startswith("effect_heads.trunk.")
+            or name.startswith("effect_heads.delta_global.")
+        )
+        groups["reward_model"] = self._union_param_names(groups["core"], groups["reward_head"])
+        groups["cont_model"] = self._union_param_names(groups["core"], groups["cont_head"])
+        groups["world_decoder"] = self._union_param_names(groups["core"], groups["decoder"])
+        groups["world_projector"] = self._union_param_names(groups["core"], groups["projector"])
+        groups["world_dreamerpro"] = self._union_param_names(groups["core"], groups["dreamerpro"])
+        groups["core_value"] = self._union_param_names(groups["core"], groups["value"])
+        groups["structured_effect_consumer"] = self._union_param_names(groups["structured_effect"], groups["consumer"])
+        return groups
+
+    def _loss_route_name(self, name):
+        if not self.loss_routing_enabled:
+            return "all_trainable"
+        if name in {"dyn", "rep"}:
+            return "core"
+        if name in self._decoder_loss_names:
+            return "world_decoder"
+        if name == "rew":
+            return "reward_model"
+        if name == "con":
+            return "cont_model"
+        if name in {"barlow", "infonce"}:
+            return "world_projector"
+        if name in {"swav", "temp", "norm"}:
+            return "world_dreamerpro"
+        if name in {"policy", "mode_gap"}:
+            return "actor"
+        if name == "value":
+            return "value"
+        if name == "repval":
+            return "core_value"
+        if name.startswith("struct_") or name in {"spatial_recon", "region_map", "slot_mask"}:
+            return "structured_effect"
+        if name.startswith("delta_"):
+            if self.use_rule_prediction_consumer and self.rule_prediction_consumer_mode == "residual":
+                return "structured_effect_consumer"
+            return "structured_effect"
+        if name in {"event", "reach", "goal"} or name.startswith("local_") or name.startswith("obj_"):
+            return "structured_effect"
+        if name.startswith("op_"):
+            return "phase2_operator"
+        if name.startswith("bind_"):
+            return "phase2_binding"
+        if name.startswith("sig_"):
+            return "phase2_signature"
+        if name == "rule_update":
+            return "phase2_rule_update"
+        if name.startswith("memory_"):
+            return "phase2_rule"
+        if name in {"rule_apply", "two_step_apply", "four_step_apply", "seven_step_apply"}:
+            return "phase2_rule"
+        if name == "rule_consumer_global_aux":
+            return "consumer"
+        if name == "rule_consumer_global_consistency":
+            return "effect_global"
+        raise KeyError(f"No loss routing rule defined for loss '{name}'.")
+
+    def _loss_route_param_names(self, name):
+        route_name = self._loss_route_name(name)
+        if route_name not in self._loss_routing_param_groups:
+            raise KeyError(f"Unknown loss routing group '{route_name}' for loss '{name}'.")
+        return route_name, self._loss_routing_param_groups[route_name]
+
+    def _backward_losses(self, losses):
+        scaled_losses = OrderedDict()
+        routed_losses = OrderedDict()
+        for name, loss in losses.items():
+            scale = self._loss_scale_for(name)
+            scaled_loss = loss * scale
+            scaled_losses[name] = scaled_loss
+            if scale == 0.0 or not scaled_loss.requires_grad:
+                continue
+            route_name, param_names = self._loss_route_param_names(name)
+            if not param_names:
+                raise RuntimeError(f"Loss '{name}' routed to empty parameter set '{route_name}'.")
+            if route_name not in routed_losses:
+                routed_losses[route_name] = {
+                    "loss": scaled_loss,
+                    "param_names": param_names,
+                }
+            else:
+                routed_losses[route_name]["loss"] = routed_losses[route_name]["loss"] + scaled_loss
+        if scaled_losses:
+            total_loss = sum(scaled_losses.values())
+            metric_ref = next(iter(scaled_losses.values())).detach()
+        else:
+            total_loss = torch.zeros((), device=self.device, dtype=torch.float32)
+            metric_ref = total_loss
+        active_routes = list(routed_losses.items())
+        for index, (_, route_info) in enumerate(active_routes):
+            params = [self._trainable_named_params[name] for name in route_info["param_names"]]
+            self._scaler.scale(route_info["loss"]).backward(
+                inputs=params,
+                retain_graph=index < len(active_routes) - 1,
+            )
+        route_metrics = {
+            "opt/loss_route_count": metric_ref.new_tensor(float(len(active_routes))),
+            "opt/loss_routing_enabled": metric_ref.new_tensor(float(self.loss_routing_enabled)),
+        }
+        for route_name, route_info in active_routes:
+            route_metrics[f"opt/route_{route_name}"] = route_info["loss"].detach()
+        return total_loss, route_metrics
 
     def to(self, *args, **kwargs):
         super().to(*args, **kwargs)
@@ -2222,10 +2396,10 @@ class Dreamer(nn.Module):
         metrics.update(tools.tensorstats(value, "value_replay"))
         metrics.update(tools.tensorstats(slow_value, "slow_value_replay"))
 
-        total_loss = sum([v * self._loss_scale_for(k) for k, v in losses.items()])
-        self._scaler.scale(total_loss).backward()
+        total_loss, route_metrics = self._backward_losses(losses)
 
         metrics.update({f"loss/{name}": loss for name, loss in losses.items()})
+        metrics.update(route_metrics)
         metrics.update({"opt/loss": total_loss})
         return (post_stoch, post_deter), metrics, replay_priority
 

@@ -119,6 +119,9 @@ def make_model_config(
             "use_signature_head": use_phase2,
             "use_rule_update": use_phase2,
             "use_rule_prediction_consumer": use_rule_prediction_consumer,
+            "loss_routing": {
+                "enabled": True,
+            },
             "lr": 1e-4,
             "agc": 0.3,
             "pmin": 1e-3,
@@ -437,6 +440,32 @@ def make_discrete_batch(obs_tensors, action_dim):
 
 
 class Phase1ATest(unittest.TestCase):
+    def _set_only_loss_scale(self, agent, loss_name, scale=1.0):
+        for key in list(agent._loss_scales.keys()):
+            agent._loss_scales[key] = 0.0
+        for key in list(agent.phase1b_early_loss_scales.keys()):
+            agent.phase1b_early_loss_scales[key] = 0.0
+        agent._loss_scales[loss_name] = float(scale)
+        if loss_name in agent.phase1b_early_loss_scales:
+            agent.phase1b_early_loss_scales[loss_name] = float(scale)
+
+    def _grad_abs_max(self, agent, prefix):
+        grads = [
+            float(param.grad.detach().abs().max())
+            for name, param in agent._named_params.items()
+            if name.startswith(prefix) and param.grad is not None
+        ]
+        return max(grads) if grads else 0.0
+
+    def _run_single_loss_backward(self, agent, batch):
+        initial_state = agent.get_initial_state(batch.batch_size[0])
+        agent._optimizer.zero_grad(set_to_none=True)
+        _, metrics, _ = agent._cal_grad(
+            agent.preprocess(batch),
+            (initial_state["stoch"], initial_state["deter"]),
+        )
+        return metrics
+
     def _run_case(
         self,
         obs_space,
@@ -558,6 +587,104 @@ class Phase1ATest(unittest.TestCase):
             "goal_progress_head.out.weight",
         ):
             torch.testing.assert_close(state_dict[key], restored.state_dict()[key])
+
+    def test_phase1a_delta_routing_stays_out_of_encoder_rssm(self):
+        torch.manual_seed(0)
+        config = make_model_config(cnn_keys="^$", mlp_keys="state")
+        obs_space = DictSpace({"state": BoxSpace((6,))})
+        act_space = BoxSpace((3,))
+        agent = Dreamer(config, obs_space, act_space)
+        self._set_only_loss_scale(agent, "delta_global")
+
+        batch = make_batch({"state": torch.randn(2, 4, 6)}, sum(act_space.shape))
+        self._run_single_loss_backward(agent, batch)
+
+        self.assertGreater(self._grad_abs_max(agent, "structured_readout."), 0.0)
+        self.assertGreater(self._grad_abs_max(agent, "effect_model."), 0.0)
+        self.assertGreater(self._grad_abs_max(agent, "effect_heads.delta_global."), 0.0)
+        self.assertEqual(self._grad_abs_max(agent, "encoder."), 0.0)
+        self.assertEqual(self._grad_abs_max(agent, "rssm."), 0.0)
+
+    def test_rule_consumer_aux_routing_stays_local(self):
+        torch.manual_seed(0)
+        config = make_model_config(
+            cnn_keys="^$",
+            mlp_keys="state",
+            use_objectification=True,
+            use_phase2=True,
+            use_rule_prediction_consumer=True,
+        )
+        config.rule_prediction_consumer.mode = "aux"
+        config.rule_prediction_consumer.detach_rule_inputs = False
+        obs_space = DictSpace({"state": BoxSpace((6,))})
+        act_space = BoxSpace((3,))
+        agent = Dreamer(config, obs_space, act_space)
+        self._set_only_loss_scale(agent, "rule_consumer_global_aux")
+
+        batch = make_batch({"state": torch.randn(2, 4, 6)}, sum(act_space.shape))
+        self._run_single_loss_backward(agent, batch)
+
+        self.assertGreater(self._grad_abs_max(agent, "rule_prediction_consumer."), 0.0)
+        self.assertEqual(self._grad_abs_max(agent, "effect_model."), 0.0)
+        self.assertEqual(self._grad_abs_max(agent, "structured_readout."), 0.0)
+        self.assertEqual(self._grad_abs_max(agent, "operator_bank."), 0.0)
+        self.assertEqual(self._grad_abs_max(agent, "rule_update_head."), 0.0)
+        self.assertEqual(self._grad_abs_max(agent, "encoder."), 0.0)
+        self.assertEqual(self._grad_abs_max(agent, "rssm."), 0.0)
+
+    def test_rule_consumer_consistency_routing_only_updates_effect_global(self):
+        torch.manual_seed(0)
+        config = make_model_config(
+            cnn_keys="^$",
+            mlp_keys="state",
+            use_objectification=True,
+            use_phase2=True,
+            use_rule_prediction_consumer=True,
+        )
+        config.rule_prediction_consumer.mode = "aux"
+        config.rule_prediction_consumer.detach_rule_inputs = False
+        config.rule_prediction_consumer.detach_aux_on_consistency = False
+        obs_space = DictSpace({"state": BoxSpace((6,))})
+        act_space = BoxSpace((3,))
+        agent = Dreamer(config, obs_space, act_space)
+        self._set_only_loss_scale(agent, "rule_consumer_global_consistency")
+
+        batch = make_batch({"state": torch.randn(2, 4, 6)}, sum(act_space.shape))
+        metrics = self._run_single_loss_backward(agent, batch)
+
+        route_name, param_names = agent._loss_route_param_names("rule_consumer_global_consistency")
+        self.assertEqual(route_name, "effect_global")
+        self.assertTrue(any(name.startswith("effect_model.") for name in param_names))
+        self.assertTrue(any(name.startswith("effect_heads.trunk.") for name in param_names))
+        self.assertTrue(any(name.startswith("effect_heads.delta_global.") for name in param_names))
+        self.assertGreater(float(metrics["loss/rule_consumer_global_consistency"].detach()), 0.0)
+        self.assertEqual(self._grad_abs_max(agent, "rule_prediction_consumer."), 0.0)
+        self.assertEqual(self._grad_abs_max(agent, "structured_readout."), 0.0)
+        self.assertEqual(self._grad_abs_max(agent, "encoder."), 0.0)
+        self.assertEqual(self._grad_abs_max(agent, "rssm."), 0.0)
+
+    def test_phase2_rule_apply_routing_stays_inside_phase2_layer(self):
+        torch.manual_seed(0)
+        config = make_model_config(
+            cnn_keys="^$",
+            mlp_keys="state",
+            use_objectification=True,
+            use_phase2=True,
+        )
+        obs_space = DictSpace({"state": BoxSpace((6,))})
+        act_space = BoxSpace((3,))
+        agent = Dreamer(config, obs_space, act_space)
+        self._set_only_loss_scale(agent, "rule_apply")
+
+        batch = make_batch({"state": torch.randn(2, 4, 6)}, sum(act_space.shape))
+        self._run_single_loss_backward(agent, batch)
+
+        self.assertGreater(self._grad_abs_max(agent, "rule_update_head."), 0.0)
+        self.assertGreater(self._grad_abs_max(agent, "binding_head."), 0.0)
+        self.assertEqual(self._grad_abs_max(agent, "effect_model."), 0.0)
+        self.assertEqual(self._grad_abs_max(agent, "structured_readout."), 0.0)
+        self.assertEqual(self._grad_abs_max(agent, "encoder."), 0.0)
+        self.assertEqual(self._grad_abs_max(agent, "rssm."), 0.0)
 
     def _build_structured(self, agent, batch, initial):
         batch = agent.preprocess(batch)
