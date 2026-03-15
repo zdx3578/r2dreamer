@@ -626,11 +626,11 @@ The preferred next step is:
 - let `delta_rule_fused / rho_next_pred` help `delta_map / delta_obj / delta_global`
 - keep actor/value conditioning and planner integration out of scope until this is justified
 
-The minimal first implementation should stay deliberately narrow:
+The validated direction is now narrower than the original residual-consumer idea:
 
 - keep the replay-off development line (`no_prio`) as the only primary baseline
-- add a small residual rule consumer on top of `z_eff`, `delta_rule_fused`, and `rho_next_pred`
-- use it only to correct `delta_map / delta_obj / delta_global`
+- prefer an aux-only rule consumer first
+- keep any direct residual injection to `delta_map / delta_obj / delta_global` on hold unless a weaker schedule is shown cleanly
 - keep planner, actor/value consumers, and replay changes out of scope for this tranche
 
 ### Practical Execution Rule
@@ -671,7 +671,110 @@ Current rule-consumer versioning:
   - keep the v4 late schedule
   - additionally require detached phase2 gate readiness before enabling residuals
   - first validation targets are `seed_1` and `seed_4`
+- `v8`: `global-only + sticky gate + latch ramp`
+  - intended to keep residuals narrow and late
+  - a later bugfix showed the original apparently good `seed_4 @ 20k` result was a false positive caused by residuals not reaching the Phase1A loss path
+  - after the wiring fix, real residual injection degraded `seed_4 @ 20k`
+- `v9`: `aux-only + consistency`
+  - keeps the rule signal on the prediction side without directly rewriting the main residual path
+  - currently the only rule-consumer line with repeatable positive short-horizon evidence
 
 Promotion rule:
 
 - do not escalate rule-consumer changes to `50k` until `seed_4` stops showing repeated clean `20k` scheduled-eval regression
+
+### 2026-03-15 Rule-Consumer Validation Update
+
+Recent rule-consumer experiments now support a clearer split between the residual line and the aux-only line.
+
+#### `v8` Residual Line
+
+What changed:
+
+- the residual path bug was fixed so that consumer-updated `effect_out` also updates `structured["dynamic"]["effect_out"]`
+- this made the residual consumer finally train the same tensors used by the Phase1A losses
+
+What the fixed `seed_4 @ 20k` rerun showed:
+
+- `no_prio`: `best_eval=215.0`, `last_eval=159.0`, `raw_mode=51.5`, `mode=145.33`
+- `v8 fixed`: `best_eval=148.0`, `last_eval=148.0`, `raw_mode=1.5`, `mode=156.67`
+- `rule_consumer_global_residual_ratio` rose as high as `0.562`
+
+Current interpretation:
+
+- the earlier apparently strong `v8` result was not trustworthy because the residual branch had not been wired into the main loss path
+- once residuals were truly active, direct residual injection proved too invasive
+- the residual line is therefore paused rather than promoted
+
+#### `v9` Aux-Only Line
+
+`20k` short-horizon validation on `seed_3/4/5`:
+
+- `no_prio`: `mean_best=256.67`, `mean_last=120.17`
+- `v9`: `mean_best=242.5`, `mean_last=240.17`
+
+Interpretation:
+
+- `v9` clearly improved late-stage stability at `20k`
+- this was the first rule-consumer line that looked worth carrying to `50k`
+
+Original `50k` validation on `seed_3/4/5`:
+
+- `no_prio`: `mean_best=251.0`, `mean_last=95.8`
+- `v9`: `mean_best=278.5`, `mean_last=43.3`
+
+Interpretation:
+
+- original `v9` could raise peak scores
+- but it remained too strong at `50k`, especially on `seed_3` and `seed_5`
+
+First weakened `v9` attempt:
+
+- `AUX_LOSS_SCALE=0.005`
+- `CONSISTENCY_LOSS_SCALE=0.0025`
+- `START_UPDATES=5000`
+- `RAMP_UPDATES=2000`
+- `LATCH_RAMP_UPDATES=2000`
+
+This attempt was invalid for algorithm judgment because:
+
+- total `50k` updates in the current throughput profile were only about `3063`
+- `START_UPDATES=5000` meant the consumer never activated
+
+Current weakened `v9` configuration (`weak2`):
+
+- `AUX_LOSS_SCALE=0.005`
+- `CONSISTENCY_LOSS_SCALE=0.0025`
+- `START_UPDATES=1500`
+- `RAMP_UPDATES=500`
+- `LATCH_RAMP_UPDATES=1000`
+
+Current `weak2` readout:
+
+- `seed_3`
+  - `no_prio`: `best_eval=317.0`, `last_eval=0.0`, `raw_mode=0.0`, `mode=1.5`
+  - `v9 weak2`: `best_eval=224.5`, `last_eval=41.5`, `raw_mode=30.0`, `mode=30.0`
+- `seed_5`
+  - `no_prio`: `best_eval=111.5`, `last_eval=48.0`, `raw_mode=30.0`, `mode=30.0`
+  - `v9 weak2`: `best_eval=263.0`, `last_eval=100.0`, `raw_mode=100.0`, `mode=100.0`
+
+Important validity point:
+
+- `weak2` really did activate the consumer
+- `rule_consumer_effective_scale` reached `1.0`
+- `rule_consumer_aux_weight` reached `1.0`
+- `rule_consumer_global_residual_ratio` reached about `0.058` on `seed_3` and `0.080` on `seed_5`
+
+Current interpretation:
+
+- weakening and delaying `v9` helped
+- `seed_5` improved materially versus the original `v9 @ 50k`
+- `seed_3` also improved versus the original `v9 @ 50k`, but still did not beat its baseline
+- the correct next checkpoint is `seed_4 @ 50k` with the `weak2` schedule
+
+Current decision gate:
+
+- run `no_prio` vs `no_prio_rule_consumer_aux` on `seed_4 @ 50k`
+- keep the `weak2` parameters
+- only if `seed_4` also stays clean should the branch rerun `seed_3/4/5 @ 50k`
+- only after that should `100k` be considered

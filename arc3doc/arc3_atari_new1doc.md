@@ -532,7 +532,7 @@ Phase 1A 当前主要包含两组损失：
    - `rho-conditioned structured prediction consumer`
    - 先让 `delta_rule_fused / rho_next_pred` 帮助 `delta_map / delta_obj / delta_global`
    - 暂不直接进入 actor / planner 主推理路径
-   - 第一刀只做 prediction-side residual consumer，保持 replay、planner、actor/value 路径不变
+   - 第一刀优先保留在 prediction-side，但当前更可取的是 **aux-only consumer**，直接 residual 注入暂不转主线
 5. 在此基础上，再决定：
    - 是否继续扩更长 rollout
    - 是否进入更强推理路径
@@ -597,6 +597,126 @@ Phase 1A 当前主要包含两组损失：
 当前升级规则：
 
 - 在 `seed_4` 的 clean `20k` 控制实验不稳定之前，不升 `50k`
+
+### 当前 rule-consumer 验证更新（2026-03-15）
+
+最近几轮验证已经把 rule-consumer 的主线收敛得更清楚了：
+
+- `v8 residual` 这条线目前应暂停；
+- `v9 aux-only` 这条线仍值得继续，但必须走弱化版 schedule；
+- 当前最近的决策门是：先补 `seed_4 @ 50k weak2`，再决定是否统一重跑 `seed_3/4/5 @ 50k`。
+
+#### `v8 residual` 的当前结论
+
+之前 `v8` 一度看起来在 `seed_4 @ 20k` 上有正信号，但后续定位到一个真实接线问题：
+
+- consumer 更新了 top-level `structured["effect_out"]`
+- 但 Phase1A 主损失实际读的是 `structured["dynamic"]["effect_out"]`
+
+修复接线之后，`v8` 才变成真正工作的 residual consumer。修复后的 `seed_4 @ 20k` 结果是：
+
+- `no_prio`
+  - `best_eval=215.0`
+  - `last_eval=159.0`
+  - `raw_mode=51.5`
+  - `mode=145.33`
+- `v8 fixed`
+  - `best_eval=148.0`
+  - `last_eval=148.0`
+  - `raw_mode=1.5`
+  - `mode=156.67`
+
+同时，`rule_consumer_global_residual_ratio` 最高到了大约 `0.562`。
+
+当前解释是：
+
+- 之前那个漂亮结果是假阳性，因为 residual 其实没真正进入主损失路径；
+- 一旦 residual 真注进去，当前 `v8` 的 direct residual injection 太强，会把主预测路径拉坏；
+- 所以 `v8 residual` 现在不再继续放大。
+
+#### `v9 aux-only` 的当前结论
+
+`v9` 在 `20k, seed_3/4/5` 上给出的信号是当前最好的一条：
+
+- `no_prio`
+  - `mean_best=256.67`
+  - `mean_last=120.17`
+- `v9`
+  - `mean_best=242.5`
+  - `mean_last=240.17`
+
+这说明 `v9` 在 `20k` 更像是在改善后段稳定性，而不是只抬偶然峰值。
+
+但原版 `v9` 拉到 `50k` 后仍然过强：
+
+- `no_prio`
+  - `mean_best=251.0`
+  - `mean_last=95.8`
+- `v9`
+  - `mean_best=278.5`
+  - `mean_last=43.3`
+
+也就是：
+
+- 峰值会更高；
+- 但 `seed_3` 和 `seed_5` 后段都出现更明显 collapse。
+
+#### `v9 weak2` 的当前定位
+
+第一次弱化版尝试把启用设到了：
+
+- `START_UPDATES=5000`
+
+但当前这套 `50k` throughput profile 下，总 updates 只有大约 `3063`，所以那轮其实没开起来，不能作为算法结论。
+
+当前有效的弱化版是 `weak2`：
+
+- `AUX_LOSS_SCALE=0.005`
+- `CONSISTENCY_LOSS_SCALE=0.0025`
+- `START_UPDATES=1500`
+- `RAMP_UPDATES=500`
+- `LATCH_RAMP_UPDATES=1000`
+
+当前已完成的 `weak2` 结果：
+
+- `seed_3`
+  - `no_prio`: `best_eval=317.0`, `last_eval=0.0`, `raw_mode=0.0`, `mode=1.5`
+  - `v9 weak2`: `best_eval=224.5`, `last_eval=41.5`, `raw_mode=30.0`, `mode=30.0`
+- `seed_5`
+  - `no_prio`: `best_eval=111.5`, `last_eval=48.0`, `raw_mode=30.0`, `mode=30.0`
+  - `v9 weak2`: `best_eval=263.0`, `last_eval=100.0`, `raw_mode=100.0`, `mode=100.0`
+
+这轮是有效实验，因为：
+
+- `rule_consumer_effective_scale` 到了 `1.0`
+- `rule_consumer_aux_weight` 到了 `1.0`
+- `rule_consumer_consistency_abs` 非零
+- `rule_consumer_global_residual_ratio`
+  - `seed_3` 到了约 `0.058`
+  - `seed_5` 到了约 `0.080`
+
+所以当前最准确的判断是：
+
+- `weak2` 确实比原版 `v9 @ 50k` 更温和；
+- `seed_5` 有明显改善；
+- `seed_3` 比原版 `v9 @ 50k` 好，但仍没赢过自己的 baseline；
+- 还不能直接升 `100k`。
+
+#### 当前下一步
+
+当前下一步固定为：
+
+- `no_prio`
+- `no_prio_rule_consumer_aux`
+- `AUX_LOSS_SCALE=0.005`
+- `CONSISTENCY_LOSS_SCALE=0.0025`
+- `START_UPDATES=1500`
+- `RAMP_UPDATES=500`
+- `LATCH_RAMP_UPDATES=1000`
+- `seed_4`
+- `50k`
+
+只有当 `seed_4 @ 50k weak2` 也过线，才统一重跑 `seed_3/4/5 @ 50k weak2`；之后才考虑 `100k`。
 
 ---
 
