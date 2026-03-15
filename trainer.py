@@ -35,16 +35,52 @@ class OnlineTrainer:
         self._checkpoint_dir = None
         self._prev_eval_score = None
         self._prev_probe_mode_score = None
+        self._resume_step = None
+        self._resume_update_count = 0
         if self.logdir is not None:
             self._checkpoint_dir = self.logdir / "checkpoints"
             self._checkpoint_dir.mkdir(parents=True, exist_ok=True)
+
+    def _trainer_state_dict(self):
+        return {
+            "prev_eval_score": self._prev_eval_score,
+            "prev_probe_mode_score": self._prev_probe_mode_score,
+            "resume_update_count": int(self._resume_update_count),
+            "should_pretrain_once": bool(self._should_pretrain._once),
+            "should_log_last": self._should_log._last,
+            "should_eval_last": self._should_eval._last,
+            "should_save_last": self._should_save._last,
+        }
 
     def _checkpoint_items(self, agent, step):
         return {
             "step": int(step),
             "agent_state_dict": agent.state_dict(),
             "optims_state_dict": tools.recursively_collect_optim_state_dict(agent),
+            "replay_buffer_state_dict": self.replay_buffer.state_dict(),
+            "trainer_state_dict": self._trainer_state_dict(),
         }
+
+    def load_checkpoint(self, agent, checkpoint_path):
+        checkpoint = torch.load(checkpoint_path, map_location="cpu")
+        agent.load_state_dict(checkpoint["agent_state_dict"])
+        if "optims_state_dict" in checkpoint:
+            tools.recursively_load_optim_state_dict(agent, checkpoint["optims_state_dict"])
+        if "replay_buffer_state_dict" not in checkpoint:
+            raise ValueError(
+                f"Checkpoint {checkpoint_path} does not contain replay buffer state; exact resume is not possible."
+            )
+        self.replay_buffer.load_state_dict(checkpoint["replay_buffer_state_dict"])
+        trainer_state = checkpoint.get("trainer_state_dict", {})
+        self._prev_eval_score = trainer_state.get("prev_eval_score")
+        self._prev_probe_mode_score = trainer_state.get("prev_probe_mode_score")
+        self._resume_step = int(checkpoint.get("step", 0))
+        self._resume_update_count = int(trainer_state.get("resume_update_count", 0))
+        self._should_pretrain._once = bool(trainer_state.get("should_pretrain_once", False))
+        self._should_log._last = trainer_state.get("should_log_last")
+        self._should_eval._last = trainer_state.get("should_eval_last")
+        self._should_save._last = trainer_state.get("should_save_last")
+        return self._resume_step
 
     def save_latest(self, agent, step):
         if self.logdir is None:
@@ -277,8 +313,8 @@ class OnlineTrainer:
         """
         envs = self.train_envs
         video_cache = []
-        step = self.replay_buffer.count() * self._action_repeat
-        update_count = 0
+        step = self._resume_step if self._resume_step is not None else self.replay_buffer.count() * self._action_repeat
+        update_count = self._resume_update_count
         # (B,)
         done = torch.ones(envs.env_num, dtype=torch.bool, device=agent.device)
         returns = torch.zeros(envs.env_num, dtype=torch.float32, device=agent.device)
@@ -351,6 +387,7 @@ class OnlineTrainer:
                     _metrics = agent.update(self.replay_buffer)
                     train_metrics = _metrics
                 update_count += update_num
+                self._resume_update_count = update_count
                 # Log training metrics
                 if self._should_log(step):
                     for name, value in train_metrics.items():

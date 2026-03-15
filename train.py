@@ -64,6 +64,19 @@ def main(config):
         probe_eval_envs=probe_eval_envs,
         sample_eval_envs=sample_eval_envs,
     )
+    resume_from = getattr(config.trainer, "resume_from", None)
+    auto_resume = bool(getattr(config.trainer, "auto_resume", False))
+    checkpoint_path = None
+    if resume_from:
+        checkpoint_path = pathlib.Path(resume_from).expanduser()
+    elif auto_resume:
+        candidate = logdir / "latest.pt"
+        if candidate.exists():
+            checkpoint_path = candidate
+    if checkpoint_path is not None:
+        checkpoint_path = checkpoint_path.resolve()
+        print(f"Resuming from checkpoint {checkpoint_path}")
+        policy_trainer.load_checkpoint(agent, checkpoint_path)
     final_step = policy_trainer.begin(agent)
     policy_trainer.save_latest(agent, final_step)
 

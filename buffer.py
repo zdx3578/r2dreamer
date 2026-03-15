@@ -94,3 +94,19 @@ class Buffer:
         if self._buffer.storage.shape is None:
             return 0
         return self._buffer.storage.shape.numel()
+
+    def state_dict(self):
+        return {
+            "device": str(self.device),
+            "storage_device": str(self.storage_device),
+            "num_eps": int(self.num_eps),
+            "buffer": self._buffer.state_dict(),
+        }
+
+    def load_state_dict(self, state_dict):
+        storage_device = torch.device(state_dict.get("storage_device", str(self.storage_device)))
+        if storage_device != self.storage_device:
+            self.storage_device = storage_device
+            self._buffer = self._make_buffer(self.storage_device)
+        self.num_eps = int(state_dict.get("num_eps", 0))
+        self._buffer.load_state_dict(state_dict["buffer"])

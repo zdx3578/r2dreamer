@@ -59,6 +59,17 @@ class BufferTest(unittest.TestCase):
         replay = Buffer(make_buffer_config(prioritized=False))
         self.assertEqual(replay._buffer._sampler.__class__.__name__, "SliceSampler")
 
+    def test_buffer_state_dict_roundtrip_restores_count(self):
+        replay = Buffer(make_buffer_config(prioritized=False))
+        for step in range(4):
+            replay.add_transition(make_transition(step))
+
+        restored = Buffer(make_buffer_config(prioritized=False))
+        restored.load_state_dict(replay.state_dict())
+
+        self.assertEqual(restored.count(), replay.count())
+        self.assertEqual(restored.storage_device.type, replay.storage_device.type)
+
 
 if __name__ == "__main__":
     unittest.main()

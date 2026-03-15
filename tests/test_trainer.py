@@ -12,12 +12,19 @@ from trainer import OnlineTrainer
 class _FakeReplayBuffer:
     def __init__(self):
         self.transitions = []
+        self.loaded_state = None
 
     def count(self):
         return 0
 
     def add_transition(self, trans):
         self.transitions.append(trans)
+
+    def state_dict(self):
+        return {"transitions": len(self.transitions)}
+
+    def load_state_dict(self, state_dict):
+        self.loaded_state = dict(state_dict)
 
 
 class _FakeLogger:
@@ -220,6 +227,73 @@ class TrainerEvalSchedulingTest(unittest.TestCase):
         self.assertIn("episode/eval_calibrated_mode_score", [name for name, _ in logger.scalars])
         self.assertIn("episode/eval_actor_top1_prob", [name for name, _ in logger.scalars])
         self.assertIn((1, False), logger.write_steps)
+
+    def test_load_checkpoint_restores_replay_and_trainer_state(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            logdir = Path(tmpdir)
+            replay = _FakeReplayBuffer()
+            replay.transitions.extend([1, 2, 3])
+            logger = _FakeLogger()
+            trainer = OnlineTrainer(
+                _make_config(steps=2, save_every=1),
+                replay,
+                logger,
+                logdir,
+                _FakeParallelEnv(reward_on_step=1.0),
+                _FakeParallelEnv(reward_on_step=2.0),
+            )
+            agent = _FakeAgent()
+            with torch.no_grad():
+                agent.weight.fill_(3.0)
+            trainer._prev_eval_score = 12.0
+            trainer._prev_probe_mode_score = 7.0
+            trainer._resume_update_count = 42
+            trainer._should_pretrain._once = False
+            trainer._should_log._last = 100
+            trainer._should_eval._last = 200
+            trainer._should_save._last = 300
+            trainer.save_latest(agent, step=123)
+
+            restored_replay = _FakeReplayBuffer()
+            restored_trainer = OnlineTrainer(
+                _make_config(steps=2, save_every=1),
+                restored_replay,
+                _FakeLogger(),
+                logdir,
+                _FakeParallelEnv(reward_on_step=1.0),
+                _FakeParallelEnv(reward_on_step=2.0),
+            )
+            restored_agent = _FakeAgent()
+            resumed_step = restored_trainer.load_checkpoint(restored_agent, logdir / "latest.pt")
+
+            self.assertEqual(resumed_step, 123)
+            self.assertEqual(restored_trainer._resume_step, 123)
+            self.assertEqual(restored_trainer._resume_update_count, 42)
+            self.assertEqual(restored_trainer._prev_eval_score, 12.0)
+            self.assertEqual(restored_trainer._prev_probe_mode_score, 7.0)
+            self.assertFalse(restored_trainer._should_pretrain._once)
+            self.assertEqual(restored_trainer._should_log._last, 100)
+            self.assertEqual(restored_trainer._should_eval._last, 200)
+            self.assertEqual(restored_trainer._should_save._last, 300)
+            self.assertEqual(restored_replay.loaded_state, {"transitions": 3})
+            self.assertEqual(float(restored_agent.weight.item()), 3.0)
+
+    def test_load_checkpoint_rejects_legacy_agent_only_checkpoint(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            logdir = Path(tmpdir)
+            ckpt = logdir / "legacy.pt"
+            torch.save({"step": 10, "agent_state_dict": _FakeAgent().state_dict(), "optims_state_dict": {}}, ckpt)
+
+            trainer = OnlineTrainer(
+                _make_config(steps=2),
+                _FakeReplayBuffer(),
+                _FakeLogger(),
+                logdir,
+                _FakeParallelEnv(reward_on_step=1.0),
+                _FakeParallelEnv(reward_on_step=2.0),
+            )
+            with self.assertRaisesRegex(ValueError, "does not contain replay buffer state"):
+                trainer.load_checkpoint(_FakeAgent(), ckpt)
 
     def test_begin_logs_sample_probe_metrics_when_enabled(self):
         logger = _FakeLogger()
