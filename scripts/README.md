@@ -37,7 +37,9 @@ Helper:
 
 - `scripts/pull_experiment_repos.sh`
   Runs `git pull --ff-only` in this repo locally and on the configured remote
-  hosts. Default remote host list is `2080`. Override with
+  hosts. Remote sync now runs through `ssh <host> 'bash -lc ...'` so the pull
+  happens inside the remote login shell. Default remote host list is `2080`.
+  Override with
   `REMOTE_HOSTS="2080 otherhost"`.
 
 Guardrail:

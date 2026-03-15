@@ -15,7 +15,8 @@ When a run depends on local code changes, use this sequence:
 1. Finish the code changes locally.
 2. Review the diff and commit the intended changes.
 3. Push to `origin/main`.
-4. On the experiment machines, run `git pull --ff-only`.
+4. On remote experiment machines, sync via an explicit login shell, for example:
+   `ssh <host> 'bash -lc "cd <repo> && git pull --ff-only"'`.
 5. Launch runs only after the machines are on the intended `HEAD`.
 
 If a user asks for remote experiments and the code is not yet on the remote
