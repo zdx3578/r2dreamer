@@ -2,8 +2,10 @@
 
 ## Experiment Ops Defaults
 
-- SSH experiment hosts are defined in the local SSH config. The canonical host aliases for this repo are `2080`, `2070`, and `87`.
-- Prefer `2080` and `2070` for active GPU experiments. Use `87` as extra capacity or fallback.
+- The three experiment machines in this workflow are `2080`, `2070`, and `87`.
+- `2070` refers to the local machine in the current workspace, not an SSH host alias.
+- SSH experiment hosts are defined in the local SSH config. The canonical remote host aliases in this repo are `2080` and `87`.
+- Prefer `2080` and local `2070` for active GPU experiments. Use `87` as extra capacity or fallback.
 - Remote code sync is git-only. Do not use `scp` or manual file copies to update experiment machines.
 
 ## Remote Update Flow
@@ -43,4 +45,3 @@ When starting, restarting, or summarizing runs, report:
 - absolute logdir
 - git `HEAD`
 - whether the canonical throughput profile above was used
-

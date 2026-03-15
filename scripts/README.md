@@ -10,7 +10,8 @@ For new Codex sessions, the repo-level operational defaults now live in
 
 Use that file for concise, durable rules such as:
 
-- which SSH host aliases are canonical for experiments
+- which machines are local vs remote for experiments
+- which SSH host aliases are canonical for remote machines
 - whether remote sync is git-only
 - the current canonical run profile that new sessions should assume
 
